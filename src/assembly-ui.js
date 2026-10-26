@@ -74,11 +74,23 @@ export const AssemblyMixin = {
 
   updateAssemblyBodies() {
     const bodies = [];
+    // exploded view: offsets from the center of all components (display only)
+    let center = null;
+    if (this.explodeFactor) {
+      const pts = this.doc.components.filter((c) => !c.suppressed && this.asmData.get(c.id)?.data).map((c) => {
+        const b = this.asmData.get(c.id).data.bbox;
+        return [0, 1, 2].map((k) => (b.min[k] + b.max[k]) / 2 + c.position[k]);
+      });
+      center = pts.length ? [0, 1, 2].map((k) => pts.reduce((s, p) => s + p[k], 0) / pts.length) : [0, 0, 0];
+    }
     for (const c of this.doc.components) {
       if (c.suppressed) continue;
       const d = this.asmData.get(c.id)?.data;
       if (!d) continue;
-      bodies.push({ id: c.id, data: d, matrix: componentMatrix(c), appearance: appearanceOf(c.part), hidden: c.hidden });
+      const matrix = componentMatrix(c);
+      const off = center ? this.explodeOffset(c, center) : null;
+      if (off) matrix.premultiply(new THREE.Matrix4().makeTranslation(...off));
+      bodies.push({ id: c.id, data: d, matrix, appearance: appearanceOf(c.part), hidden: c.hidden });
     }
     this.viewport.setBodies(bodies);
     this.refreshAssemblyHighlights();
@@ -567,7 +579,7 @@ export const AssemblyMixin = {
     if (st.type && st.type !== 'concentric' && st.type !== 'parallel' && st.type !== 'perpendicular') {
       body.append(this.pmGroup('Options',
         this.fieldCheck('Flip alignment (faces point the same way)', () => st.flip, (v) => { st.flip = v; preview(); }),
-        MATE_TYPES[st.type].value ? this.fieldNumber('Distance', () => st.value, (v) => { st.value = v; preview(); }) : null));
+        MATE_TYPES[st.type].value ? this.fieldNumber(st.type === 'angle' ? 'Angle' : 'Distance', () => st.value, (v) => { st.value = v; preview(); }, { unit: MATE_TYPES[st.type].unit || 'len' }) : null));
     }
   },
 

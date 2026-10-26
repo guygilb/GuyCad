@@ -54,11 +54,21 @@ export const native = window.guycadNative || null;
 export const FILE_FILTERS = {
   gcad: [{ name: 'GuyCAD Part', extensions: ['gcad'] }],
   gasm: [{ name: 'GuyCAD Assembly', extensions: ['gasm'] }],
-  open: [{ name: 'GuyCAD Documents', extensions: ['gcad', 'gasm'] }],
+  gdrw: [{ name: 'GuyCAD Drawing', extensions: ['gdrw'] }],
+  open: [{ name: 'GuyCAD Documents', extensions: ['gcad', 'gasm', 'gdrw'] }],
   step: [{ name: 'STEP', extensions: ['step', 'stp'] }],
+  brep: [{ name: 'OpenCascade BREP', extensions: ['brep'] }],
   stl: [{ name: 'STL Mesh', extensions: ['stl'] }],
+  '3mf': [{ name: '3D Manufacturing Format', extensions: ['3mf'] }],
   obj: [{ name: 'Wavefront OBJ', extensions: ['obj'] }],
+  ply: [{ name: 'Polygon File (PLY)', extensions: ['ply'] }],
   glb: [{ name: 'glTF Binary', extensions: ['glb'] }],
+  gltf: [{ name: 'glTF', extensions: ['gltf'] }],
+  usdz: [{ name: 'USDZ (AR)', extensions: ['usdz'] }],
+  pdf: [{ name: 'PDF Document', extensions: ['pdf'] }],
+  svg: [{ name: 'SVG Image', extensions: ['svg'] }],
+  dxf: [{ name: 'DXF Drawing', extensions: ['dxf'] }],
+  csv: [{ name: 'CSV Table', extensions: ['csv'] }],
   png: [{ name: 'PNG Image', extensions: ['png'] }],
 };
 

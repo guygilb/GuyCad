@@ -3,6 +3,11 @@
 import * as THREE from 'three';
 import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
+import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
+import { PLYExporter } from 'three/examples/jsm/exporters/PLYExporter.js';
+import { USDZExporter } from 'three/examples/jsm/exporters/USDZExporter.js';
+import { make3MF, sketchToDXF } from './exporters.js';
+import { DrawingMixin } from './drawing-ui.js';
 import { Viewport, VIEWS, DISPLAY_STYLES } from './viewport.js';
 import { Sketcher, SKETCH_TOOLS, buildSketchObject } from './sketcher.js';
 import { STD_PLANES, frameFromNormal, frameMatrix, resolvePlane, revolveAxisOptions, extractLoops, computeFrames } from './geometry.js';
@@ -16,8 +21,21 @@ import { MATERIALS, FINISHES, SWATCHES, SAMPLES, appearanceOf } from './library.
 import { $, h, ico, clone, uid, val, evalNumber, native, FILE_FILTERS, download, storage } from './ui.js';
 
 const DEG = 180 / Math.PI;
-const SOLID_TYPES = new Set(['extrude', 'revolve', 'linpattern', 'cirpattern', 'mirror']);
-const PICK_FEATURES = new Set(['fillet', 'chamfer', 'shell']);
+const SOLID_TYPES = new Set(['extrude', 'revolve', 'sweep', 'loft', 'hole', 'linpattern', 'cirpattern', 'mirror']);
+const PICK_FEATURES = new Set(['fillet', 'chamfer', 'shell', 'draft']);
+// features that need an existing body
+const BODY_FEATURES = new Set(['fillet', 'chamfer', 'shell', 'draft', 'hole']);
+// Hole Wizard sizes: clearance hole (normal fit) with matching counterbore / countersink, mm.
+const HOLE_SIZES = [
+  { label: 'Custom' },
+  ...[['M2', 2.4, 4.4, 2.2, 4.4], ['M2.5', 2.9, 5.4, 2.7, 5.5], ['M3', 3.4, 6.5, 3.3, 6.3], ['M4', 4.5, 8, 4.4, 8.4], ['M5', 5.5, 10, 5.4, 10.4],
+    ['M6', 6.6, 11, 6.5, 12.4], ['M8', 9, 15, 8.6, 16.4], ['M10', 11, 18, 10.8, 20.4], ['M12', 13.5, 20, 13, 24.4], ['M16', 17.5, 26, 17.5, 32.4],
+    ['#4 (inch)', 3.26, 5.94, 2.84, 6.6], ['#6 (inch)', 3.86, 6.86, 3.51, 7.9], ['#8 (inch)', 4.5, 7.92, 4.17, 9.3], ['#10 (inch)', 5.11, 9.53, 4.83, 10.4],
+    ['1/4" (inch)', 6.76, 11.13, 6.35, 13.2], ['5/16" (inch)', 8.33, 13.49, 7.92, 16.5], ['3/8" (inch)', 9.92, 15.88, 9.53, 19.6]]
+    .map(([label, d, cb, cbd, cs]) => ({ label: `${label} clearance`, d, cb, cbd, cs })),
+];
+// sketch references held by each feature type
+const sketchRefs = (f) => [f.sketch, f.profile, f.path, ...(f.sections || [])].filter(Boolean);
 
 const SETTINGS_KEY = 'guycad.settings';
 const AUTOSAVE_KEY = 'guycad.autosave';
@@ -36,12 +54,19 @@ const DEFAULT_SETTINGS = {
   showPlanes: false,
   showOrigin: true,
   showSketches: true,
+  sketchFilletRadius: 3,
+  offsetDistance: 2,
 };
 
 const FEATURE_META = {
   sketch: { icon: 'sketch', prefix: 'Sketch', label: 'Sketch' },
   extrude: { icon: (f) => (f.cut ? 'extrudeCut' : 'extrude'), prefix: (f) => (f.cut ? 'Cut-Extrude' : 'Boss-Extrude'), label: (f) => (f.cut ? 'Cut-Extrude' : 'Boss-Extrude') },
   revolve: { icon: (f) => (f.cut ? 'revolveCut' : 'revolve'), prefix: (f) => (f.cut ? 'Cut-Revolve' : 'Revolve'), label: (f) => (f.cut ? 'Cut-Revolve' : 'Revolve') },
+  sweep: { icon: (f) => (f.cut ? 'sweepCut' : 'sweep'), prefix: (f) => (f.cut ? 'Cut-Sweep' : 'Sweep'), label: (f) => (f.cut ? 'Swept Cut' : 'Swept Boss/Base') },
+  loft: { icon: (f) => (f.cut ? 'loftCut' : 'loft'), prefix: (f) => (f.cut ? 'Cut-Loft' : 'Loft'), label: (f) => (f.cut ? 'Lofted Cut' : 'Lofted Boss/Base') },
+  draft: { icon: 'draft', prefix: 'Draft', label: 'Draft' },
+  hole: { icon: 'hole', prefix: (f) => ({ cbore: 'CBORE Hole', csink: 'CSK Hole' }[f.holeType] || 'Hole'), label: 'Hole Wizard' },
+  import: { icon: 'import', prefix: 'Imported', label: 'Imported Body' },
   fillet: { icon: 'fillet', prefix: 'Fillet', label: 'Fillet' },
   chamfer: { icon: 'chamfer', prefix: 'Chamfer', label: 'Chamfer' },
   shell: { icon: 'shell', prefix: 'Shell', label: 'Shell' },
@@ -126,6 +151,7 @@ export class App {
     this.viewport.overlay.add(this.measureGroup);
     $('#viewport').append(h('div', { class: 'vp-watermark' }, 'GuyCAD'));
     this.initAssembly();
+    this.initDrawing();
 
     this.buildCommands();
     this.buildMenubar();
@@ -169,6 +195,7 @@ export class App {
   blankDoc(type = 'part') {
     const base = { version: 2, author: this.settings?.userName || '', created: new Date().toISOString() };
     if (type === 'assembly') return { ...base, type: 'assembly', name: this.nextDocName('Assembly'), components: [], mates: [] };
+    if (type === 'drawing') return this.blankDrawing(base);
     return { ...base, type: 'part', name: this.nextDocName('Part'), material: 'Plain Carbon Steel', appearance: null, features: [], rollback: null };
   }
 
@@ -196,6 +223,8 @@ export class App {
     if (v && this.tab.link) this.writeLinkedPart(this.tab);
   }
   get isAsm() { return this.doc.type === 'assembly'; }
+  get isDrawing() { return this.doc.type === 'drawing'; }
+  get isPart() { return !this.isAsm && !this.isDrawing; }
 
   openTab(doc, extra = {}) {
     const tab = { id: uid('t'), doc, undoStack: [], redoStack: [], dirty: false, fileHandle: null, filePath: null, link: null, view: null, ...extra };
@@ -244,7 +273,7 @@ export class App {
       if (!comp) t.link = null;
     }
     this.selection = null;
-    this.cmTab = this.isAsm ? 'Assembly' : 'Features';
+    this.cmTab = this.defaultCmTab();
     this.buildCommandManager();
     this.restoreView(true);
     this.refreshAll();
@@ -265,7 +294,7 @@ export class App {
     const keep = this.tabs.findIndex((x) => x.id === activeId);
     this.tabIndex = keep >= 0 ? keep : Math.min(i, this.tabs.length - 1);
     this.selection = null;
-    this.cmTab = this.isAsm ? 'Assembly' : 'Features';
+    this.cmTab = this.defaultCmTab();
     this.buildCommandManager();
     this.restoreView(true);
     this.refreshAll();
@@ -277,7 +306,7 @@ export class App {
     bar.replaceChildren();
     this.tabs.forEach((t, i) => {
       const el = h('div', { class: `doc-tab${i === this.tabIndex ? ' active' : ''}`, title: t.filePath || t.doc.name, onclick: () => this.switchTab(i) },
-        ico(t.doc.type === 'assembly' ? 'assembly' : 'part'),
+        ico({ assembly: 'assembly', drawing: 'drawing' }[t.doc.type] || 'part'),
         h('span', { class: 'dt-name' }, `${t.doc.name}${t.dirty && !t.link ? ' *' : ''}`),
         t.link ? h('span', { class: 'dt-link' }, `in ${this.tabs.find((x) => x.id === t.link.asmTabId)?.doc.name || 'assembly'}`) : null,
         h('button', { class: 'dt-close', title: 'Close', onclick: (e) => { e.stopPropagation(); this.closeTab(i); } }, '×'));
@@ -297,7 +326,7 @@ export class App {
     const C = {};
     const add = (id, label, iconName, run, extra = {}) => { C[id] = { id, label, icon: iconName, run, ...extra }; };
     const inSketch = () => this.mode === 'sketch';
-    const part = () => !this.isAsm;
+    const part = () => this.isPart;
     add('new', 'New Part', 'new', () => this.cmdNew('part'), { tip: 'Create a new part' });
     add('newAssembly', 'New Assembly', 'assembly', () => this.cmdNew('assembly'));
     add('open', 'Open...', 'open', () => this.cmdOpen(), { short: 'Ctrl+O' });
@@ -346,13 +375,29 @@ export class App {
     add('cirpattern', 'Circular Pattern', 'cirpattern', () => this.cmdFeature('cirpattern'), { enabled: part });
     add('mirror', 'Mirror', 'mirror', () => this.cmdFeature('mirror'), { enabled: part });
     add('plane', 'Plane', 'plane', () => this.cmdFeature('plane'), { enabled: part });
+    add('sweep', 'Swept Boss/Base', 'sweep', () => this.cmdFeature('sweep', false), { enabled: part });
+    add('sweepCut', 'Swept Cut', 'sweepCut', () => this.cmdFeature('sweep', true), { enabled: part });
+    add('loft', 'Lofted Boss/Base', 'loft', () => this.cmdFeature('loft', false), { enabled: part });
+    add('loftCut', 'Lofted Cut', 'loftCut', () => this.cmdFeature('loft', true), { enabled: part });
+    add('draft', 'Draft', 'draft', () => this.cmdFeature('draft'), { enabled: part });
+    add('hole', 'Hole Wizard', 'hole', () => this.cmdFeature('hole'), { enabled: part });
+    add('offsetEntities', 'Offset Entities', 'offsetEntities', () => this.sketcher.offsetSelected(this.settings.offsetDistance, false), { enabled: () => inSketch() && this.sketcher.selected.size > 0 });
+    add('mirrorEntities', 'Mirror Entities', 'mirrorEntities', () => this.sketcher.mirrorSelected(), { enabled: () => inSketch() && this.sketcher.selected.size > 0 });
+    add('importModel', 'Import (STEP, STL, BREP)...', 'import', () => this.cmdImport());
+    add('exportBREP', 'BREP (*.brep) — OpenCascade', 'export', () => this.exportModel('brep'));
+    add('export3MF', '3MF (*.3mf) — 3D printing', 'export', () => this.exportModel('3mf'));
+    add('exportSTLascii', 'STL ASCII (*.stl)', 'export', () => this.exportModel('stl-ascii'));
+    add('exportPLY', 'PLY (*.ply)', 'export', () => this.exportModel('ply'));
+    add('exportGLTF', 'glTF (*.gltf)', 'export', () => this.exportModel('gltf'));
+    add('exportUSDZ', 'USDZ (*.usdz) — AR', 'export', () => this.exportModel('usdz'));
+    add('exportSketchDXF', 'Selected Sketch as DXF...', 'export', () => this.exportSketchDXF(), { enabled: () => this.isPart && (this.mode === 'sketch' || this.byId(this.selection?.id)?.type === 'sketch') });
     add('measure', 'Measure', 'measure', () => this.cmdMeasure(), { active: () => !!this.measure });
     add('massProps', 'Mass Properties', 'mass', () => this.showMassProps());
     add('section', 'Section View', 'section', () => this.cmdSection(), { active: () => !!this.section });
     add('stats', 'Feature Statistics', 'stats', () => this.showStats(), { enabled: part });
     for (const [id, v] of Object.entries(VIEWS)) add(`view:${id}`, v.label, VIEW_ICONS[id], () => this.setView(id), { short: v.key });
     add('normalTo', 'Normal To', 'normalTo', () => this.normalTo(), { short: '8' });
-    add('zoomFit', 'Zoom to Fit', 'zoomFit', () => this.viewport.zoomToFit(), { short: 'F' });
+    add('zoomFit', 'Zoom to Fit', 'zoomFit', () => (this.isDrawing ? this.fitSheet() : this.viewport.zoomToFit()), { short: 'F' });
     for (const [id, label] of Object.entries(DISPLAY_STYLES)) {
       add(`style:${id}`, label, 'displayStyle', () => this.setDisplayStyle(id), { active: () => this.viewport.displayStyle === id });
     }
@@ -362,6 +407,7 @@ export class App {
     add('appearance', 'Edit Appearance', 'appearance', () => this.openTaskPane('appearance'));
     add('material', 'Edit Material', 'material', () => this.openTaskPane('material'), { enabled: part });
     this.addAssemblyCommands(add);
+    this.addDrawingCommands(add);
     this.commands = C;
   }
 
@@ -403,23 +449,26 @@ export class App {
   buildMenubar() {
     const tools = Object.keys(SKETCH_TOOLS).filter((t) => t !== 'select').map((t) => `tool:${t}`);
     this.menus = {
-      File: ['new', 'newAssembly', 'open', '|', 'save', 'saveAs', 'closeDoc', '|',
-        { label: 'Export', icon: 'export', items: ['exportSTEP', 'exportSTL', 'exportOBJ', 'exportGLB'] }, 'screenshot', '|', 'makeAssembly', '|', 'welcome'],
+      File: () => ['new', 'newAssembly', 'newDrawing', 'open', '|', 'save', 'saveAs', 'closeDoc', '|', 'importModel',
+        this.isDrawing
+          ? { label: 'Export', icon: 'export', items: ['exportPDF', 'exportSVG', 'exportDXF'] }
+          : { label: 'Export', icon: 'export', items: [{ head: 'Exact solids (CAD)' }, 'exportSTEP', 'exportBREP', { head: 'Meshes (3D printing, rendering)' }, 'exportSTL', 'exportSTLascii', 'export3MF', 'exportOBJ', 'exportPLY', 'exportGLB', 'exportGLTF', 'exportUSDZ', { head: '2D' }, 'exportSketchDXF'] },
+        'screenshot', '|', 'makeAssembly', 'makeDrawing', '|', 'welcome'],
       Edit: ['undo', 'redo', '|', 'delete', 'rebuild', '|',
         { label: 'Suppress', run: () => this.suppressSelected(true), disabled: () => this.selection?.kind !== 'feature' && this.selection?.kind !== 'mate' },
         { label: 'Unsuppress', run: () => this.suppressSelected(false), disabled: () => this.selection?.kind !== 'feature' && this.selection?.kind !== 'mate' },
         { label: 'Rename...', run: () => this.renameSelection(), disabled: () => !['feature', 'component', 'mate'].includes(this.selection?.kind) }],
       View: [{ head: 'Orientation' }, ...Object.keys(VIEWS).map((v) => `view:${v}`), 'normalTo', 'zoomFit', '|', { head: 'Display Style' },
         ...Object.keys(DISPLAY_STYLES).map((s) => `style:${s}`), '|', { head: 'Show' }, 'togglePlanes', 'toggleOrigin', 'toggleSketches'],
-      Insert: () => (this.isAsm
-        ? ['insertComponent', 'mate', '|', 'moveComponent', 'rotateComponent']
+      Insert: () => (this.isDrawing ? this.drawingInsertMenu() : this.isAsm
+        ? ['insertComponent', 'mate', '|', 'moveComponent', 'rotateComponent', '|', 'explode']
         : [
-          { label: 'Boss/Base', icon: 'extrude', items: ['extrude', 'revolve'] },
-          { label: 'Cut', icon: 'extrudeCut', items: ['extrudeCut', 'revolveCut'] },
-          { label: 'Features', icon: 'fillet', items: ['fillet', 'chamfer', 'shell'] },
+          { label: 'Boss/Base', icon: 'extrude', items: ['extrude', 'revolve', 'sweep', 'loft'] },
+          { label: 'Cut', icon: 'extrudeCut', items: ['extrudeCut', 'revolveCut', 'sweepCut', 'loftCut'] },
+          { label: 'Features', icon: 'fillet', items: ['hole', 'fillet', 'chamfer', 'shell', 'draft'] },
           { label: 'Pattern/Mirror', icon: 'linpattern', items: ['linpattern', 'cirpattern', 'mirror'] },
           { label: 'Reference Geometry', icon: 'plane', items: ['plane'] }, '|', 'sketch']),
-      Tools: [{ label: 'Sketch Entities', icon: 'line', items: tools }, 'addRelation', 'construction', '|', 'measure', 'massProps', 'section', 'interference', 'stats', '|', 'appearance', 'material', '|', 'options'],
+      Tools: [{ label: 'Sketch Entities', icon: 'line', items: tools }, { label: 'Sketch Tools', icon: 'trim', items: ['tool:sfillet', 'tool:trim', 'offsetEntities', 'mirrorEntities'] }, 'addRelation', 'construction', '|', 'measure', 'massProps', 'section', 'interference', 'bom', 'stats', '|', 'appearance', 'material', '|', 'options'],
       Help: ['shortcuts', 'welcome', '|', 'about'],
     };
     const bar = $('#menubar');
@@ -496,19 +545,27 @@ export class App {
     }
   }
 
+  defaultCmTab() {
+    return { assembly: 'Assembly', drawing: 'Drawing' }[this.doc.type] || 'Features';
+  }
+
   buildCommandManager() {
-    this.cmTabs = this.isAsm
-      ? {
-        Assembly: ['insertComponent', 'mate', '|', 'moveComponent', 'rotateComponent', '|', 'editPart', 'fixComponent', '|', 'interference'],
-        Evaluate: ['measure', 'massProps', 'section', 'interference'],
-        View: ['view:front', 'view:top', 'view:right', 'view:iso', 'normalTo', 'zoomFit', '|', 'style:shadedEdges', 'style:shaded', 'style:hiddenRemoved', 'style:wireframe', '|', 'screenshot'],
-      }
-      : {
-        Features: ['extrude', 'revolve', '|', 'extrudeCut', 'revolveCut', '|', 'fillet', 'chamfer', 'shell', '|', 'linpattern', 'cirpattern', 'mirror', '|', 'plane', '|', 'sketch'],
-        Sketch: ['sketch', '|', 'tool:select', 'tool:dimension', '|', 'tool:line', 'tool:centerline', 'tool:rect', 'tool:crect', 'tool:circle', 'tool:arc', 'tool:polygon', '|', 'addRelation', 'construction', 'sketchDelete', '|', 'toggleGrid', 'toggleSnap'],
-        Evaluate: ['measure', 'massProps', 'section', 'stats'],
-        View: ['view:front', 'view:top', 'view:right', 'view:iso', 'normalTo', 'zoomFit', '|', 'style:shadedEdges', 'style:shaded', 'style:hiddenRemoved', 'style:hiddenVisible', 'style:wireframe', '|', 'screenshot'],
+    const viewTab = ['view:front', 'view:top', 'view:right', 'view:iso', 'normalTo', 'zoomFit', '|', 'style:shadedEdges', 'style:shaded', 'style:hiddenRemoved', 'style:hiddenVisible', 'style:wireframe', '|', 'screenshot'];
+    if (this.isDrawing) this.cmTabs = this.drawingCmTabs();
+    else if (this.isAsm) {
+      this.cmTabs = {
+        Assembly: ['insertComponent', 'mate', '|', 'moveComponent', 'rotateComponent', '|', 'editPart', 'fixComponent', '|', 'explode', 'bom', '|', 'makeDrawing'],
+        Evaluate: ['measure', 'massProps', 'section', 'interference', 'bom'],
+        View: viewTab,
       };
+    } else {
+      this.cmTabs = {
+        Features: ['extrude', 'revolve', 'sweep', 'loft', '|', 'extrudeCut', 'revolveCut', 'sweepCut', 'loftCut', '|', 'hole', 'fillet', 'chamfer', 'shell', 'draft', '|', 'linpattern', 'cirpattern', 'mirror', '|', 'plane', '|', 'sketch', 'makeDrawing'],
+        Sketch: ['sketch', '|', 'tool:select', 'tool:dimension', '|', 'tool:line', 'tool:centerline', 'tool:rect', 'tool:crect', 'tool:slot', 'tool:circle', 'tool:arc', 'tool:polygon', 'tool:spline', 'tool:point', '|', 'tool:sfillet', 'tool:trim', 'offsetEntities', 'mirrorEntities', '|', 'addRelation', 'construction', 'sketchDelete', '|', 'toggleGrid', 'toggleSnap'],
+        Evaluate: ['measure', 'massProps', 'section', 'stats'],
+        View: viewTab,
+      };
+    }
     if (!this.cmTabs[this.cmTab]) this.cmTab = Object.keys(this.cmTabs)[0];
     const tabs = $('#cm-tabs');
     tabs.replaceChildren();
@@ -642,7 +699,7 @@ export class App {
     }
     this.hudSection?.classList.toggle('active', !!this.section);
     const sketchName = this.mode === 'sketch' ? this.sketcher.feature?.name : null;
-    $('#doc-title').replaceChildren(h('b', {}, this.doc.name), `${this.dirty ? ' *' : ''}  —  ${this.isAsm ? 'Assembly' : 'Part'}`, sketchName ? `  —  ${sketchName}` : '');
+    $('#doc-title').replaceChildren(h('b', {}, this.doc.name), `${this.dirty ? ' *' : ''}  —  ${{ assembly: 'Assembly', drawing: 'Drawing' }[this.doc.type] || 'Part'}`, sketchName ? `  —  ${sketchName}` : '');
     document.title = `${this.doc.name}${this.dirty ? ' *' : ''} — GuyCAD`;
     let editing = `Editing ${this.doc.name}`;
     if (this.mode === 'sketch') {
@@ -672,6 +729,7 @@ export class App {
     if (this.measure) return 'Click faces, edges or points to measure. Vertices snap automatically.';
     if (this.pm?.status) return val(this.pm.status);
     if (this.pm) return 'Set the parameters in the PropertyManager, then click OK.';
+    if (this.isDrawing) return this.doc.source ? 'Drag views to arrange them. Double-click the title block to edit it. Wheel zooms, right-drag pans.' : 'Click Standard 3 View to choose the model for this drawing.';
     if (this.isAsm) {
       const n = this.doc.components.length;
       return n ? `${this.doc.name}: ${n} component${n === 1 ? '' : 's'}, ${this.doc.mates.length} mate${this.doc.mates.length === 1 ? '' : 's'}.` : 'Click Insert Components to add parts to the assembly.';
@@ -857,6 +915,10 @@ export class App {
     if (this.pm) this.pmCancel();
     if (this.section) { this.section = null; this.viewport.setSection(null); }
     this.pendingFeature = null;
+    this.dtool = null;
+    this.dsel = null;
+    this.dimPreview = null;
+    if (this.explodeFactor) { this.explodeFactor = 0; }
   }
 
   async cmdNew(type = 'part') {
@@ -873,6 +935,10 @@ export class App {
   }
 
   normalizeDoc(d) {
+    if (d.type === 'drawing') {
+      const base = this.blankDrawing({ version: 2, author: this.settings.userName, created: new Date().toISOString() });
+      return { ...base, ...d, title: { ...base.title, ...(d.title || {}) }, bom: { ...base.bom, ...(d.bom || {}) }, views: d.views || [], dims: d.dims || [], notes: d.notes || [] };
+    }
     if (d.type === 'assembly') {
       return {
         ...this.blankDoc('assembly'), ...d,
@@ -898,7 +964,7 @@ export class App {
     this.tab.dirty = dirty;
     this.tab.filePath = filePath;
     this.selection = null;
-    this.cmTab = this.isAsm ? 'Assembly' : 'Features';
+    this.cmTab = this.defaultCmTab();
     this.buildCommandManager();
     this.refreshAll();
     await this.rebuildModel();
@@ -909,7 +975,7 @@ export class App {
   loadDocText(text, { filePath = null, name = '' } = {}) {
     try {
       const d = JSON.parse(text);
-      const ok = d && (Array.isArray(d.features) || (d.type === 'assembly' && Array.isArray(d.components)));
+      const ok = d && (Array.isArray(d.features) || (d.type === 'assembly' && Array.isArray(d.components)) || d.type === 'drawing');
       if (!ok) throw new Error('bad');
       const existing = filePath && this.tabs.findIndex((t) => t.filePath === filePath);
       if (existing >= 0 && existing !== false) { this.switchTab(existing); return; }
@@ -956,7 +1022,7 @@ export class App {
       const i = this.tabs.findIndex((t) => t.id === this.tab.link.asmTabId);
       if (i >= 0) { await this.switchTab(i); return this.cmdSave(as); }
     }
-    const ext = this.isAsm ? 'gasm' : 'gcad';
+    const ext = this.isDrawing ? 'gdrw' : this.isAsm ? 'gasm' : 'gcad';
     const text = JSON.stringify({ ...this.doc, author: this.doc.author || this.settings.userName, savedAt: new Date().toISOString(), app: 'GuyCAD 2.0' }, null, 1);
     const name = `${this.doc.name}.${ext}`;
     if (native) {
@@ -991,32 +1057,113 @@ export class App {
     return [{ doc: { features: this.doc.features }, limit: this.doc.rollback }];
   }
 
+  // Exact formats come from the kernel; mesh formats from the displayed (finely tessellated) bodies.
   async exportModel(fmt) {
+    if (this.isDrawing) { this.exportDrawing(fmt); return; }
     const hasBody = this.isAsm ? this.viewport.bodies.size > 0 : !!this.build?.data;
     if (!hasBody) { this.toast('There is no solid body to export yet', 'error'); return; }
+    const ext = { 'stl-ascii': 'stl' }[fmt] || fmt;
     try {
-      let data;
-      if (fmt === 'step' || fmt === 'stl') {
-        this.setBusy(true, `Exporting ${fmt.toUpperCase()}…`);
-        data = await this.kernel.export(this.exportDocs(), fmt);
-        this.setBusy(false);
-      } else {
-        const group = new THREE.Group();
-        for (const b of this.viewport.bodies.values()) {
-          if (b.hidden) continue;
-          const m = new THREE.Mesh(b.mesh.geometry, b.material || this.viewport.bodyMat);
-          m.applyMatrix4(b.group.matrix);
-          m.name = this.isAsm ? this.doc.components.find((c) => c.id === b.id)?.name || b.id : this.doc.name;
-          group.add(m);
-        }
-        data = fmt === 'obj' ? new OBJExporter().parse(group) : await new GLTFExporter().parseAsync(group, { binary: true });
-      }
-      const saved = await download(data, `${this.doc.name}.${fmt}`);
+      const data = await this.exportData(fmt);
+      const saved = await download(data, `${this.doc.name}.${ext}`);
       if (saved) this.toast(`Exported ${saved}`, 'ok');
     } catch (err) {
       this.setBusy(false);
       this.toast(`Export failed: ${err.message}`, 'error');
     }
+  }
+
+  // The bytes/text of an export, without saving it.
+  async exportData(fmt) {
+    {
+      let data;
+      if (fmt === 'step' || fmt === 'stl' || fmt === 'brep') {
+        this.setBusy(true, `Exporting ${fmt.toUpperCase()}…`);
+        data = await this.kernel.export(this.exportDocs(), fmt);
+        this.setBusy(false);
+      } else {
+        const bodies = [...this.viewport.bodies.values()].filter((b) => !b.hidden);
+        const nameOf = (b) => (this.isAsm ? this.compName(b.id) : this.doc.name);
+        if (fmt === '3mf') {
+          data = make3MF(bodies.map((b) => ({
+            name: nameOf(b), vertices: b.data.vertices, indices: b.data.indices,
+            matrix: b.group.matrix.elements, color: `#${(b.material || this.viewport.bodyMat).color.getHexString()}`,
+          })), { title: this.doc.name });
+        } else {
+          const group = new THREE.Group();
+          for (const b of bodies) {
+            const src = b.material || this.viewport.bodyMat;
+            const mat = new THREE.MeshStandardMaterial({ color: src.color, metalness: src.metalness, roughness: src.roughness });
+            const m = new THREE.Mesh(b.mesh.geometry, mat);
+            m.applyMatrix4(b.group.matrix);
+            m.name = nameOf(b);
+            group.add(m);
+          }
+          group.updateMatrixWorld(true);
+          if (fmt === 'obj') data = new OBJExporter().parse(group);
+          else if (fmt === 'stl-ascii') data = new STLExporter().parse(group, { binary: false });
+          else if (fmt === 'ply') data = await new Promise((res) => new PLYExporter().parse(group, res, { binary: true }));
+          else if (fmt === 'gltf') data = JSON.stringify(await new GLTFExporter().parseAsync(group, { binary: false }));
+          else if (fmt === 'usdz') {
+            // USDZ (Apple AR) uses metres and Y-up: scale mm -> m
+            const scene = new THREE.Scene();
+            group.scale.setScalar(0.001);
+            scene.add(group);
+            data = await new USDZExporter().parseAsync(scene);
+          } else data = await new GLTFExporter().parseAsync(group, { binary: true });
+        }
+      }
+      return data;
+    }
+  }
+
+  async exportSketchDXF() {
+    const f = this.mode === 'sketch' ? this.sketcher.feature : this.byId(this.selection?.id);
+    if (!f || f.type !== 'sketch') { this.toast('Select a sketch first'); return; }
+    const saved = await download(sketchToDXF(f.entities), `${this.doc.name}-${f.name}.dxf`, 'application/dxf');
+    if (saved) this.toast(`Exported ${saved}`, 'ok');
+  }
+
+  // Imports STEP / STL / BREP as a new part whose first feature is the imported body.
+  async cmdImport() {
+    let file;
+    if (native) {
+      const res = await native.openFile({ filters: [{ name: '3D models', extensions: ['step', 'stp', 'stl', 'brep', 'brp'] }], binary: true });
+      if (!res) return;
+      file = { name: res.name, bytes: res.bytes };
+    } else {
+      file = await new Promise((resolve) => {
+        const input = h('input', { type: 'file', accept: '.step,.stp,.stl,.brep,.brp' });
+        input.addEventListener('change', async () => {
+          const f = input.files[0];
+          resolve(f ? { name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) } : null);
+        });
+        input.click();
+      });
+      if (!file) return;
+    }
+    const ext = file.name.split('.').pop().toLowerCase();
+    const format = ext === 'stl' ? 'stl' : ext === 'brep' || ext === 'brp' ? 'brep' : 'step';
+    const part = this.importedPartDoc(file.name, format, file.bytes);
+    if (this.isAsm) { await this.insertPart(part); return; }
+    await this.loadDoc(part, { dirty: true });
+    const err = Object.values(this.build.errors)[0];
+    this.toast(err ? `Import failed: ${err}` : `Imported ${file.name}`, err ? 'error' : 'ok');
+  }
+
+  importedPartDoc(fileName, format, bytes) {
+    let data;
+    if (format === 'brep') data = new TextDecoder().decode(bytes);
+    else {
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      data = btoa(bin);
+    }
+    const name = fileName.replace(/\.[^.]+$/, '');
+    return {
+      ...this.blankDoc('part'), name,
+      features: [{ id: uid(), type: 'import', name: `${name} (${format.toUpperCase()})`, format, data }],
+    };
   }
 
   async screenshot() {
@@ -1036,7 +1183,9 @@ export class App {
   insertIndex() { return this.doc.rollback ?? this.doc.features.length; }
 
   async rebuildModel() {
+    this.showSheet(this.isDrawing);
     if (this.isAsm) return this.rebuildAssembly();
+    if (this.isDrawing) return this.rebuildDrawing();
     const seq = ++this.buildSeq;
     const limit = this.activeLimit();
     const lim = limit < 0 ? null : limit;
@@ -1065,13 +1214,14 @@ export class App {
   }
 
   isConsumed(sketchId) {
-    return this.doc.features.some((f) => (f.type === 'extrude' || f.type === 'revolve') && f.sketch === sketchId);
+    return this.doc.features.some((f) => f.type !== 'sketch' && sketchRefs(f).includes(sketchId));
   }
 
   byId(id) { return this.doc.features?.find((f) => f.id === id); }
 
   refreshScene() {
     if (this.isAsm) { this.refreshAssemblyScene(); return; }
+    if (this.isDrawing) return;
     const box = this.viewport.bodyBox();
     let size = 100;
     if (box && !box.isEmpty()) {
@@ -1352,6 +1502,7 @@ export class App {
 
   refreshTree() {
     if (this.isAsm) { this.refreshAssemblyTree(); return; }
+    if (this.isDrawing) { this.refreshDrawingTree(); return; }
     const tree = $('#tree');
     tree.replaceChildren();
     const sel = this.selection;
@@ -1483,7 +1634,7 @@ export class App {
   }
 
   async renameDoc() {
-    const name = await this.promptBox(`Rename ${this.isAsm ? 'Assembly' : 'Part'}`, 'Name', this.doc.name);
+    const name = await this.promptBox(`Rename ${{ assembly: 'Assembly', drawing: 'Drawing' }[this.doc.type] || 'Part'}`, 'Name', this.doc.name);
     if (!name) return;
     const snap = JSON.stringify(this.doc);
     this.doc.name = name.replace(/[\\/:*?"<>|]/g, '_');
@@ -1527,7 +1678,7 @@ export class App {
       changed = false;
       for (const f of this.doc.features) {
         if (out.has(f.id)) continue;
-        const refs = [f.sketch, f.plane, f.base].filter(Boolean);
+        const refs = [...sketchRefs(f), f.plane, f.base, f.neutral].filter(Boolean);
         const patternOrphan = (f.type === 'linpattern' || f.type === 'cirpattern') && f.targets.length && f.targets.every((t) => out.has(t));
         if (refs.some((r) => out.has(r)) || patternOrphan) { out.add(f.id); changed = true; }
       }
@@ -1537,6 +1688,7 @@ export class App {
   }
 
   deleteSelection() {
+    if (this.isDrawing) { this.deleteDrawingSelection(); return; }
     if (this.isAsm) { this.deleteAsmSelection(); return; }
     if (this.selection?.kind === 'feature') this.deleteFeature(this.selection.id);
   }
@@ -1545,9 +1697,11 @@ export class App {
     const f = this.byId(id);
     if (!f) return;
     const remove = new Set([id, ...this.dependents(id)]);
-    if (f.sketch && this.doc.features.filter((x) => x.sketch === f.sketch).length === 1) {
-      remove.add(f.sketch);
-      for (const d of this.dependents(f.sketch)) remove.add(d);
+    for (const sid of sketchRefs(f)) {
+      if (this.doc.features.filter((x) => x.type !== 'sketch' && sketchRefs(x).includes(sid)).length === 1) {
+        remove.add(sid);
+        for (const d of this.dependents(sid)) remove.add(d);
+      }
     }
     const names = this.doc.features.filter((x) => remove.has(x.id)).map((x) => x.name);
     const msg = names.length > 1 ? `Delete ${f.name} and its dependent items?\n\n• ${names.join('\n• ')}` : `Delete ${f.name}?`;
@@ -1651,6 +1805,7 @@ export class App {
     this.refreshLeftTabs();
     this.renderPM();
     this.refreshChrome();
+    if (isNew && this.pendingFeature?.type === 'hole') this.sketcher.setTool('point');
     if (isNew && this.pendingFeature) this.setStatus(`Sketch the profile for the ${this.pendingFeature.cut ? 'cut' : 'feature'}, then click Exit Sketch.`);
   }
 
@@ -1718,7 +1873,7 @@ export class App {
     const grid = h('div', { class: 'tool-grid' });
     for (const [id, t] of Object.entries(SKETCH_TOOLS)) {
       grid.append(h('button', { class: sk.tool === id ? 'active' : '', title: `${t.label}${t.key && t.key.length === 1 ? ` (${t.key.toUpperCase()})` : ''}`, onclick: () => this.sketchTool(id) },
-        ico(t.icon), t.label.replace('Corner ', '').replace('Center ', 'Ctr ').replace('3 Point ', '').replace('Smart ', '')));
+        ico(t.icon), t.label.replace('Corner ', '').replace('Center ', 'Ctr ').replace('3 Point ', '').replace('Smart ', '').replace('Straight ', '').replace('Sketch ', '')));
     }
     body.append(this.pmGroup('Sketch Tools', grid));
 
@@ -1765,6 +1920,18 @@ export class App {
       `${n} entit${n === 1 ? 'y' : 'ies'} • ${loops.length} closed contour${loops.length === 1 ? '' : 's'}`,
       open.length ? h('div', { style: { color: 'var(--danger)' } }, `${open.length} open contour${open.length === 1 ? '' : 's'} — connect endpoints to use as a profile.`) : null)));
 
+    if (sk.tool === 'sfillet') {
+      body.append(this.pmGroup('Sketch Fillet',
+        this.fieldNumber('Radius', () => this.settings.sketchFilletRadius, (v) => { this.settings.sketchFilletRadius = Math.max(0.001, v); this.saveSettings(); }, { min: 0.001 })));
+    }
+    if (sk.selected.size) {
+      body.append(this.pmGroup('Modify Entities',
+        this.fieldNumber('Offset distance', () => this.settings.offsetDistance, (v) => { this.settings.offsetDistance = Math.max(0.001, v); this.saveSettings(); }, { min: 0.001 }),
+        h('div', { class: 'rel-buttons' },
+          h('button', { class: 'pm-button', onclick: () => sk.offsetSelected(this.settings.offsetDistance, false) }, 'Offset'),
+          h('button', { class: 'pm-button', onclick: () => sk.offsetSelected(this.settings.offsetDistance, true) }, 'Offset (other side)'),
+          h('button', { class: 'pm-button', onclick: () => sk.mirrorSelected() }, 'Mirror about centerline'))));
+    }
     body.append(this.pmGroup('Grid & Snap',
       this.fieldCheck('Show grid', () => this.settings.showGrid, (v) => { this.settings.showGrid = v; this.sketcher.gridSig = ''; this.saveSettings(); this.refreshChrome(); }),
       this.fieldCheck('Snap to grid', () => this.settings.snapGrid, (v) => { this.settings.snapGrid = v; this.saveSettings(); this.refreshChrome(); }),
@@ -1983,13 +2150,13 @@ export class App {
   // ================================================================ features
 
   cmdFeature(type, cut = false) {
-    if (this.isAsm) return;
+    if (!this.isPart) return;
     if (this.measure) this.closeMeasure();
     if (this.mode === 'pickPlane') this.cancelPickPlane();
     if (this.mode === 'sketch') {
       const sk = this.sketcher.feature;
       this.exitSketch(true);
-      if ((type === 'extrude' || type === 'revolve') && this.byId(sk.id)) { this.newFeature(type, cut, sk.id); return; }
+      if (['extrude', 'revolve', 'hole'].includes(type) && this.byId(sk.id)) { this.newFeature(type, cut, sk.id); return; }
     }
     const preSel = this.selection;
     if (this.pm) this.pmCancel();
@@ -2006,7 +2173,15 @@ export class App {
       this.newFeature(type, cut, sk.id);
       return;
     }
-    if (PICK_FEATURES.has(type) && !this.build.data) { this.toast('Create a solid body first', 'error'); return; }
+    if (BODY_FEATURES.has(type) && !this.build.data) { this.toast('Create a solid body first', 'error'); return; }
+    if (type === 'hole' && !this.pickHoleSketch()) {
+      // no position sketch yet: sketch points on a face first, then come back to the Hole Wizard
+      this.pendingFeature = { type: 'hole' };
+      this.cmdSketch();
+      if (this.mode === 'pickPlane') this.showBanner('Select the face to drill, then place points for the hole centers', () => this.cancelPickPlane());
+      if (this.mode === 'sketch') this.sketcher.setTool('point');
+      return;
+    }
     this.newFeature(type);
   }
 
@@ -2059,6 +2234,14 @@ export class App {
         Object.assign(f, { sketch: sketchId, axis: revolveAxisOptions(sk.entities)[0].value, angle: 360, reverse: false, cut });
         break;
       }
+      case 'sweep': {
+        const [profile, path] = this.pickSweepSketches();
+        Object.assign(f, { profile, path, cut, frenet: false });
+        break;
+      }
+      case 'loft': Object.assign(f, { sections: this.unusedSketches().slice(-2).map((x) => x.id), ruled: false, cut }); break;
+      case 'draft': Object.assign(f, { angle: 3, faces: sel?.kind === 'face' ? [this.facePoint(sel)] : [], neutral: 'Top', reverse: false }); break;
+      case 'hole': Object.assign(f, { sketch: sketchId || this.pickHoleSketch()?.id, holeType: 'simple', diameter: 6, depth: 10, through: false, cboreDiameter: 11, cboreDepth: 6, csinkDiameter: 12, csinkAngle: 90, reverse: false }); break;
       case 'fillet': Object.assign(f, { radius: 2, edges: sel?.kind === 'edge' ? [sel.info.mid] : [], all: false }); break;
       case 'chamfer': Object.assign(f, { distance: 1, edges: sel?.kind === 'edge' ? [sel.info.mid] : [], all: false }); break;
       case 'shell': Object.assign(f, { thickness: 2, faces: sel?.kind === 'face' ? [this.facePoint(sel)] : [] }); break;
@@ -2073,6 +2256,26 @@ export class App {
     }
     f.name = this.nextName(val(FEATURE_META[type].prefix, f));
     this.editFeature(f, true);
+  }
+
+  unusedSketches() {
+    return this.doc.features.slice(0, this.insertIndex()).filter((f) => f.type === 'sketch' && !f.suppressed && !this.isConsumed(f.id) && f.entities.length);
+  }
+
+  // Sweep: the path is the newest sketch with an open chain, the profile the newest closed one.
+  pickSweepSketches() {
+    const list = this.unusedSketches().reverse();
+    const isOpen = (f) => { const r = extractLoops(f.entities); return !r.loops.length && r.open.length > 0; };
+    const path = list.find(isOpen);
+    const profile = list.find((f) => f !== path && extractLoops(f.entities).loops.length);
+    return [profile?.id || null, path?.id || null];
+  }
+
+  pickHoleSketch() {
+    const sel = this.selection?.kind === 'feature' ? this.byId(this.selection.id) : null;
+    const hasPts = (f) => f?.type === 'sketch' && f.entities.some((e) => e.type === 'point');
+    if (hasPts(sel)) return sel;
+    return this.unusedSketches().reverse().find(hasPts) || null;
   }
 
   // A point on a selected face (stored as the face reference).
@@ -2117,8 +2320,12 @@ export class App {
     if (picking) {
       // show the body before this feature so edges/faces can be picked, and validate the result separately
       spec.displayLimit = () => this.doc.features.indexOf(f);
-      spec.wants = f.type === 'shell' ? ['face'] : ['edge'];
-      spec.status = () => (f.type === 'shell' ? 'Click the faces to remove (open). Then set the wall thickness.' : 'Click the edges to round or bevel. Click again to deselect.');
+      const facePick = f.type === 'shell' || f.type === 'draft';
+      spec.wants = facePick ? ['face'] : ['edge'];
+      spec.status = () => ({
+        shell: 'Click the faces to remove (open). Then set the wall thickness.',
+        draft: 'Click the faces to taper. Pick the neutral plane in the PropertyManager or click a plane.',
+      }[f.type] || 'Click the edges to round or bevel. Click again to deselect.');
       spec.highlights = () => this.featureRefHighlights(f);
       spec.validate = () => {
         clearTimeout(this.validateTimer);
@@ -2178,7 +2385,8 @@ export class App {
       rerender();
       return true;
     }
-    if (f.type === 'shell' && hit.kind === 'face') {
+    if (f.type === 'draft' && hit.kind === 'plane') { f.neutral = hit.key; delete f.neutralFrame; rerender(); return true; }
+    if ((f.type === 'shell' || f.type === 'draft') && hit.kind === 'face') {
       const data = this.build.data;
       const existing = f.faces.findIndex((p) => nearestFace(data, p) === hit.face);
       if (existing >= 0) f.faces.splice(existing, 1); else f.faces.push(hit.point.toArray());
@@ -2252,6 +2460,73 @@ export class App {
         );
         break;
       }
+      case 'sweep': {
+        const opts = [{ value: '', label: '— select —' }, ...sketches];
+        body.append(
+          this.pmGroup('Profile and Path',
+            this.fieldSelect('Profile', opts, () => f.profile || '', (v) => { f.profile = v || null; rerender(); }),
+            this.fieldSelect('Path', opts, () => f.path || '', (v) => { f.path = v || null; rerender(); }),
+            h('div', { class: 'pm-info' }, 'Profile: a closed sketch at the start of the path, on a plane across it. Path: a sketch with an open chain of lines, arcs or splines.')),
+          this.pmGroup('Options', this.fieldCheck('Keep profile orientation along the path (Frenet)', () => f.frenet, set('frenet'))),
+        );
+        break;
+      }
+      case 'loft': {
+        const all = this.doc.features.slice(0, this.doc.features.indexOf(f)).filter((x) => x.type === 'sketch');
+        const list = h('div', { class: 'pm-list pick-list' });
+        f.sections.forEach((id, i) => {
+          const sk = this.byId(id);
+          list.append(h('label', {}, h('span', { style: { flex: 1 } }, `${i + 1}. ${sk?.name || 'missing'}`),
+            h('button', { class: 'x-btn', title: 'Move up', onclick: () => { if (i) { [f.sections[i - 1], f.sections[i]] = [f.sections[i], f.sections[i - 1]]; rerender(); } } }, '↑'),
+            h('button', { class: 'x-btn', title: 'Remove', onclick: () => { f.sections.splice(i, 1); rerender(); } }, '×')));
+        });
+        if (!f.sections.length) list.append(h('div', { class: 'empty' }, 'Add two or more profile sketches.'));
+        const choices = all.filter((x) => !f.sections.includes(x.id)).map((x) => ({ value: x.id, label: x.name }));
+        body.append(
+          this.pmGroup('Profiles (in order)', list,
+            this.fieldSelect('Add profile', [{ value: '', label: '— choose a sketch —' }, ...choices], () => '', (v) => { if (v) { f.sections.push(v); rerender(); } }),
+            h('div', { class: 'pm-info' }, 'Each profile is one closed shape on its own plane (use reference planes to space them).')),
+          this.pmGroup('Options', this.fieldCheck('Ruled (straight sides between profiles)', () => f.ruled, set('ruled'))),
+        );
+        break;
+      }
+      case 'draft':
+        body.append(
+          this.pmGroup('Draft Angle', this.fieldNumber('Angle', () => f.angle, set('angle'), { unit: 'deg' }), this.fieldCheck('Reverse direction', () => f.reverse, set('reverse'))),
+          this.pmGroup('Neutral Plane', this.fieldSelect('Plane', this.planeOptions(f), () => f.neutral, set('neutral', rerender)),
+            h('div', { class: 'pm-info' }, 'Faces pivot about where they cross this plane.')),
+          this.pmGroup('Faces to Draft', this.fieldPickList(f.faces, describeFace, (i) => { f.faces.splice(i, 1); rerender(); }, () => { f.faces = []; rerender(); }, 'Click the faces to taper.')),
+          h('div', { id: 'pm-preview-info', class: 'pm-info', style: { margin: '0 10px' } }),
+        );
+        break;
+      case 'hole': {
+        const ptsSk = this.doc.features.slice(0, this.doc.features.indexOf(f)).filter((x) => x.type === 'sketch' && x.entities.some((e) => e.type === 'point' || e.type === 'circle'));
+        const n = this.byId(f.sketch)?.entities.filter((e) => e.type === 'point' || e.type === 'circle').length || 0;
+        const size = HOLE_SIZES.find((x) => x.d && Math.abs(x.d - f.diameter) < 1e-9)?.label || 'Custom';
+        body.append(
+          this.pmGroup('Hole Type',
+            this.fieldSelect('Type', [{ value: 'simple', label: 'Simple hole' }, { value: 'cbore', label: 'Counterbore' }, { value: 'csink', label: 'Countersink' }], () => f.holeType, set('holeType', rerender)),
+            this.fieldSelect('Standard size', HOLE_SIZES.map((x) => ({ value: x.label, label: x.label })), () => size, (v) => {
+              const z = HOLE_SIZES.find((x) => x.label === v);
+              if (z?.d) Object.assign(f, { diameter: z.d, cboreDiameter: z.cb, cboreDepth: z.cbd, csinkDiameter: z.cs });
+              rerender();
+            }),
+            this.fieldNumber('Diameter', () => f.diameter, set('diameter'), { min: 0.01 })),
+          this.pmGroup('End Condition',
+            this.fieldCheck('Through all', () => f.through, set('through', rerender)),
+            f.through ? null : this.fieldNumber('Depth', () => f.depth, set('depth'), { min: 0.01 }),
+            this.fieldCheck('Reverse direction', () => f.reverse, set('reverse'))),
+          f.holeType === 'cbore' ? this.pmGroup('Counterbore', this.fieldNumber('Diameter', () => f.cboreDiameter, set('cboreDiameter'), { min: 0.01 }), this.fieldNumber('Depth', () => f.cboreDepth, set('cboreDepth'), { min: 0.01 })) : null,
+          f.holeType === 'csink' ? this.pmGroup('Countersink', this.fieldNumber('Diameter', () => f.csinkDiameter, set('csinkDiameter'), { min: 0.01 }), this.fieldNumber('Angle', () => f.csinkAngle, set('csinkAngle'), { unit: 'deg', min: 1 })) : null,
+          this.pmGroup('Positions',
+            this.fieldSelect('Sketch', [{ value: '', label: '— select —' }, ...ptsSk.map((x) => ({ value: x.id, label: x.name }))], () => f.sketch || '', (v) => { f.sketch = v || null; rerender(); }),
+            h('div', { class: 'pm-info' }, `${n} hole position${n === 1 ? '' : 's'} (sketch points and circle centers).`)),
+        );
+        break;
+      }
+      case 'import':
+        body.append(this.pmGroup('Imported Body', h('div', { class: 'pm-info' }, `Format: ${f.format.toUpperCase()} · ${Math.round(f.data.length / 1024)} KB stored in this part. Add features on top of it like any other body.`)));
+        break;
       case 'shell':
         body.append(
           this.pmGroup('Parameters', this.fieldNumber('Thickness', () => f.thickness, set('thickness'), { min: 0.001 })),
@@ -2701,7 +2976,8 @@ export class App {
       }
       if (ev.altKey) return;
       if (ev.key === 'Escape') {
-        if (this.gizmo?.object) this.stopMoveComponent();
+        if (this.isDrawing && (this.dtool || this.dsel)) { this.dimPreview = null; this.dsel = null; this.setDrawingTool(null); }
+        else if (this.gizmo?.object) this.stopMoveComponent();
         else if (this.mode === 'pickPlane') this.cancelPickPlane();
         else if (this.pm && this.mode !== 'sketch') this.pmCancel();
         else if (this.selection) { this.selection = null; this.afterSelect(); }
@@ -2709,7 +2985,8 @@ export class App {
       }
       if (ev.key === 'Enter') { if (this.pm) { ev.preventDefault(); this.pmOK(); } return; }
       if (ev.key === 'Delete') { if (this.mode === 'model') this.deleteSelection(); return; }
-      if (k === 'f') { this.viewport.zoomToFit(); return; }
+      if (k === 'f') { this.run('zoomFit'); return; }
+      if (this.isDrawing) return;
       if (k === ' ') { ev.preventDefault(); this.showViewFlyout(null); return; }
       if (k === '8') { this.normalTo(); return; }
       for (const [id, v] of Object.entries(VIEWS)) if (v.key === k) { this.setView(id); return; }
@@ -2727,4 +3004,4 @@ export class App {
   }
 }
 
-Object.assign(App.prototype, AssemblyMixin);
+Object.assign(App.prototype, AssemblyMixin, DrawingMixin);

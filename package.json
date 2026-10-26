@@ -11,7 +11,7 @@
     "build": "vite build",
     "start": "vite build && node electron/launch.cjs",
     "dist": "vite build && electron-builder --win",
-    "test": "node tests/kernel.test.mjs && node tests/constraints.test.mjs && node tests/assembly.test.mjs"
+    "test": "node tests/kernel.test.mjs && node tests/constraints.test.mjs && node tests/sketch-tools.test.mjs && node tests/assembly.test.mjs"
   },
   "author": "Guy Gilboa",
   "license": "ISC",

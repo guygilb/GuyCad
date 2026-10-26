@@ -88,14 +88,33 @@ ipcMain.handle('file:save', async (event, { suggestedName, data, filePath, filte
   return { filePath: target, name: path.basename(target) };
 });
 
-ipcMain.handle('file:open', async (event, { filters }) => {
+ipcMain.handle('file:open', async (event, { filters, binary }) => {
   const res = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender), {
     properties: ['openFile'],
     filters: filtersFor(filters),
   });
   if (res.canceled || !res.filePaths.length) return null;
   const filePath = res.filePaths[0];
+  if (binary) return { filePath, name: path.basename(filePath), bytes: new Uint8Array(await fs.readFile(filePath)) };
   return { filePath, name: path.basename(filePath), text: await fs.readFile(filePath, 'utf8') };
+});
+
+// Vector PDF of an SVG drawing sheet, rendered by an offscreen window.
+ipcMain.handle('pdf:fromSVG', async (_event, { svg, widthMM, heightMM }) => {
+  const win = new BrowserWindow({ show: false, webPreferences: { sandbox: true, javascript: false } });
+  try {
+    const html = `<!doctype html><html><head><meta charset="utf-8"><style>@page{size:${widthMM}mm ${heightMM}mm;margin:0}html,body{margin:0;padding:0}svg{display:block;width:${widthMM}mm;height:${heightMM}mm}</style></head><body>${svg}</body></html>`;
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    const pdf = await win.webContents.printToPDF({
+      pageSize: { width: widthMM / 25.4, height: heightMM / 25.4 },
+      printBackground: true,
+      margins: { marginType: 'none' },
+      preferCSSPageSize: true,
+    });
+    return new Uint8Array(pdf);
+  } finally {
+    win.destroy();
+  }
 });
 
 ipcMain.handle('file:read', async (_event, filePath) => ({

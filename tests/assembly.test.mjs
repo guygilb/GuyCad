@@ -38,3 +38,10 @@ c = comps();
 const before = JSON.stringify(c);
 res = solveMates(c, [...mates, { type: 'distance', value: 7, a: mates[1].a, b: mates[1].b }]);
 check('conflict reported, nothing moved', !res.ok && JSON.stringify(c) === before);
+
+// angle mate between two planar faces
+c = comps();
+res = solveMates(c, [mates[0], { type: 'angle', value: 30, a: { comp: 'base', ref: { kind: 'plane', point: [0, 10, 0], normal: [1, 0, 0] } }, b: { comp: 'pin', ref: { kind: 'plane', point: [0, 0, 0], normal: [1, 0, 0] } } }]);
+const qq = new THREE.Quaternion(...c[1].quaternion);
+const nx = new THREE.Vector3(1, 0, 0).applyQuaternion(qq);
+check('angle mate', res.ok && near(Math.acos(nx.x) * 180 / Math.PI, 30, 1e-3), (Math.acos(nx.x) * 180 / Math.PI).toFixed(4));

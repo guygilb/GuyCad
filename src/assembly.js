@@ -6,6 +6,7 @@ export const MATE_TYPES = {
   parallel: { label: 'Parallel', icon: 'mateParallel', refs: ['plane', 'plane'] },
   perpendicular: { label: 'Perpendicular', icon: 'matePerpendicular', refs: ['plane', 'plane'] },
   distance: { label: 'Distance', icon: 'mateDistance', refs: ['plane', 'plane'], value: true },
+  angle: { label: 'Angle', icon: 'mateAngle', refs: ['plane', 'plane'], value: true, unit: 'deg' },
   concentric: { label: 'Concentric', icon: 'mateConcentric', refs: ['axis', 'axis'] },
 };
 
@@ -50,6 +51,9 @@ function mateResiduals(m, A, B) {
     }
     case 'perpendicular':
       return [A.d.dot(B.d)];
+    case 'angle':
+      // angle between the face normals (flip measures it from the other side)
+      return [A.d.dot(B.d) * sign - Math.cos(((m.value || 0) * Math.PI) / 180)];
     case 'concentric': {
       const c = A.d.clone().cross(B.d);
       const off = B.p.clone().sub(A.p).cross(A.d);
