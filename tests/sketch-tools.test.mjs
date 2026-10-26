@@ -66,3 +66,12 @@ sk = headless([{ type: 'centerline', a: [0, -10], b: [0, 10] }, { type: 'circle'
 sk.selected = new Set([0, 1]);
 sk.mirrorSelected();
 check('mirror entities', near(sk.entities[2].c[0], -5) && near(sk.entities[2].c[1], 2));
+
+// three-click shapes and tangent arcs
+import { threeClickShape, tangentArc } from '../src/sketcher.js';
+const ell = threeClickShape('ellipse', [0, 0], [10, 0], [3, 4]);
+check('ellipse from 3 clicks', near(ell.rx, 10) && near(ell.ry, 4) && near(ell.rot, 0));
+const r3 = threeClickShape('rect3', [0, 0], [10, 10], [0, 5]);
+check('3-point rectangle is a closed loop', extractLoops(r3).loops.length === 1);
+const ta = tangentArc([10, 0], [1, 0], [10, 20]);
+check('tangent arc leaves along the line', near(ta.r, 10) && near(ta.c[0], 10) && near(ta.c[1], 10), JSON.stringify(ta));

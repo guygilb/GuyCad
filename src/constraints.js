@@ -13,6 +13,7 @@ const LAYOUT = {
   arc: ['c0', 'c1', 'r', 'a0ang', 'a1ang'],
   polygon: ['c0', 'c1', 'r', 'rot'],
   point: ['p0', 'p1'],
+  ellipse: ['c0', 'c1', 'rx', 'ry', 'rot'],
 };
 
 // Splines have one x/y pair per through-point.
@@ -26,6 +27,7 @@ function readParam(e, k) {
     case 'b0': return e.b[0]; case 'b1': return e.b[1];
     case 'c0': return e.c[0]; case 'c1': return e.c[1];
     case 'r': return e.r; case 'rot': return e.rot;
+    case 'rx': return e.rx; case 'ry': return e.ry;
     case 'a0ang': return e.a0; case 'a1ang': return e.a1;
     default: return 0;
   }
@@ -39,6 +41,7 @@ function writeParam(e, k, v) {
     case 'b0': e.b[0] = v; break; case 'b1': e.b[1] = v; break;
     case 'c0': e.c[0] = v; break; case 'c1': e.c[1] = v; break;
     case 'r': e.r = v; break; case 'rot': e.rot = v; break;
+    case 'rx': e.rx = v; break; case 'ry': e.ry = v; break;
     case 'a0ang': e.a0 = v; break; case 'a1ang': e.a1 = v; break;
     default: break;
   }
@@ -84,6 +87,7 @@ function view(entities, x, offsets) {
           return [(P(i, 0) + P(i, 2)) / 2, (P(i, 1) + P(i, 3)) / 2];
         case 'circle': return [P(i, 0), P(i, 1)];
         case 'point': return [P(i, 0), P(i, 1)];
+        case 'ellipse': return [P(i, 0), P(i, 1)];
         case 'spline': {
           const last = e.pts.length - 1;
           const k = ref.p === 'a' ? 0 : ref.p === 'b' ? last : Number(String(ref.p).slice(1)) || 0;

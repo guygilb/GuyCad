@@ -169,6 +169,7 @@ export function sketchToDXF(entities) {
       case 'rect': d.polyline(entityPoints(e).slice(0, 4), true, L); break;
       case 'polygon': d.polyline(polygonVertices(e), true, L); break;
       case 'spline': d.polyline(entityPoints(e), false, L); break;
+      case 'ellipse': d.polyline(entityPoints(e).slice(0, -1), true, L); break;
       default: break;
     }
   }

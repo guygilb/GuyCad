@@ -160,3 +160,10 @@ check('incremental rebuild', !Object.keys(again.errors).length, `first ${(t1 - t
   check('front view: circle + outline', front.circles.length >= 1 && near(front.circles[0].r, 10, 1e-6) && near(front.bbox[2] - front.bbox[0], 100, 1e-6), JSON.stringify(front.bbox));
   check('top view: hole is hidden', top.hidden.length >= 2 && near(top.bbox[3] - top.bbox[1], 20, 1e-6), `${top.hidden.length} hidden edges`);
 }
+
+// 11) ellipse profile
+r = await build({ features: [
+  { id: 's', type: 'sketch', plane: 'Front', entities: [{ type: 'ellipse', c: [5, 5], rx: 6, ry: 10, rot: 0.3 }] },
+  { id: 'e', type: 'extrude', sketch: 's', endCondition: 'blind', depth: 4 },
+] });
+check('ellipse extrusion (minor > major handled)', near(vol(r), Math.PI * 60 * 4, 1e-3), vol(r).toFixed(4));

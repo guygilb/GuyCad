@@ -1,7 +1,7 @@
 // OpenCascade (replicad) part kernel: rebuilds the feature history into an exact B-rep solid
 // and serializes it into render/pick data. Runs in a Web Worker in the app and in Node for tests.
 import {
-  draw, drawCircle, Plane, getOC, measureShapeVolumeProperties, measureArea, EdgeFinder, FaceFinder,
+  draw, drawCircle, drawEllipse, makeEllipse, Plane, getOC, measureShapeVolumeProperties, measureArea, EdgeFinder, FaceFinder,
   makeLine, makeThreePointArc, makeBezierCurve, makeCircle, assembleWire, genericSweep,
   importSTEP, importSTL, deserializeShape, makeProjectedEdges, ProjectionCamera,
 } from 'replicad';
@@ -14,8 +14,15 @@ const REF_TOL = 0.02; // mm: how far a stored edge/face reference point may drif
 
 // ---------------------------------------------------------------- sketch -> solid
 
+// replicad ellipses need major >= minor: swap axes (and turn 90°) when needed
+const ellipseAxes = (el) => (el.rx >= el.ry ? { a: el.rx, b: el.ry, rot: el.rot } : { a: el.ry, b: el.rx, rot: el.rot + Math.PI / 2 });
+
 function loopDrawing(loop) {
   if (loop.circle) return drawCircle(loop.circle.r).translate(loop.circle.c[0], loop.circle.c[1]);
+  if (loop.ellipse) {
+    const { a, b, rot } = ellipseAxes(loop.ellipse);
+    return drawEllipse(a, b).rotate((rot * 180) / Math.PI, [0, 0]).translate(loop.ellipse.c[0], loop.ellipse.c[1]);
+  }
   let pen = draw(loop.segs[0].a);
   for (const s of loop.segs) {
     if (s.kind === 'line') pen = pen.lineTo(s.b);
@@ -38,6 +45,11 @@ function segmentsWire(segs, frame) {
 
 function loopWire(loop, frame) {
   if (loop.circle) return assembleWire([makeCircle(loop.circle.r, frameToWorld(frame, loop.circle.c), frame.normal)]);
+  if (loop.ellipse) {
+    const { a, b, rot } = ellipseAxes(loop.ellipse);
+    const o = frameToWorld(frame, loop.ellipse.c), tip = frameToWorld(frame, [loop.ellipse.c[0] + Math.cos(rot), loop.ellipse.c[1] + Math.sin(rot)]);
+    return assembleWire([makeEllipse(a, b, o, frame.normal, [tip[0] - o[0], tip[1] - o[1], tip[2] - o[2]])]);
+  }
   return segmentsWire(loop.segs, frame);
 }
 

@@ -561,7 +561,7 @@ export class App {
     } else {
       this.cmTabs = {
         Features: ['extrude', 'revolve', 'sweep', 'loft', '|', 'extrudeCut', 'revolveCut', 'sweepCut', 'loftCut', '|', 'hole', 'fillet', 'chamfer', 'shell', 'draft', '|', 'linpattern', 'cirpattern', 'mirror', '|', 'plane', '|', 'sketch', 'makeDrawing'],
-        Sketch: ['sketch', '|', 'tool:select', 'tool:dimension', '|', 'tool:line', 'tool:centerline', 'tool:rect', 'tool:crect', 'tool:slot', 'tool:circle', 'tool:arc', 'tool:polygon', 'tool:spline', 'tool:point', '|', 'tool:sfillet', 'tool:trim', 'offsetEntities', 'mirrorEntities', '|', 'addRelation', 'construction', 'sketchDelete', '|', 'toggleGrid', 'toggleSnap'],
+        Sketch: ['sketch', '|', 'tool:select', 'tool:dimension', '|', 'tool:line', 'tool:centerline', 'tool:rect', 'tool:crect', 'tool:rect3', 'tool:slot', 'tool:circle', 'tool:ellipse', 'tool:arc', 'tool:carc', 'tool:tarc', 'tool:polygon', 'tool:spline', 'tool:point', '|', 'tool:sfillet', 'tool:trim', 'offsetEntities', 'mirrorEntities', '|', 'addRelation', 'construction', 'sketchDelete', '|', 'toggleGrid', 'toggleSnap'],
         Evaluate: ['measure', 'massProps', 'section', 'stats'],
         View: viewTab,
       };

@@ -132,6 +132,15 @@ export function entityPoints(e, seg = 72) {
       return [e.a, e.b];
     case 'point':
       return [e.p];
+    case 'ellipse': {
+      const pts = [];
+      const cr = Math.cos(e.rot), sr = Math.sin(e.rot);
+      for (let i = 0; i <= seg; i++) {
+        const t = (i / seg) * Math.PI * 2, x = e.rx * Math.cos(t), y = e.ry * Math.sin(t);
+        pts.push([e.c[0] + x * cr - y * sr, e.c[1] + x * sr + y * cr]);
+      }
+      return pts;
+    }
     case 'spline': {
       const pts = [e.pts[0]];
       for (const s of splineBeziers(e.pts)) for (let i = 1; i <= 16; i++) pts.push(bezierPoint(s, i / 16));
@@ -216,6 +225,8 @@ export function extractLoops(entities) {
     if (e.type === 'centerline' || e.type === 'point' || e.construction) continue;
     if (e.type === 'circle') {
       if (e.r > 1e-9) loops.push({ circle: { c: [...e.c], r: e.r }, pts: entityPoints(e).slice(0, -1) });
+    } else if (e.type === 'ellipse') {
+      if (e.rx > 1e-9 && e.ry > 1e-9) loops.push({ ellipse: { c: [...e.c], rx: e.rx, ry: e.ry, rot: e.rot }, pts: entityPoints(e).slice(0, -1) });
     } else if (e.type === 'rect' || e.type === 'polygon') {
       const segs = entitySegments(e).filter((s) => d2(s.a, s.b) > 1e-9);
       if (segs.length >= 3) loops.push({ segs, pts: entityPoints(e).slice(0, -1) });
@@ -252,7 +263,7 @@ export function extractLoops(entities) {
       open.push(pts);
     }
   }
-  return { loops: loops.filter((l) => l.circle || l.pts.length >= 2), open };
+  return { loops: loops.filter((l) => l.circle || l.ellipse || l.pts.length >= 2), open };
 }
 
 // The single open chain of a sketch (lines, arcs, splines joined end to end), used as a sweep path.
@@ -261,7 +272,7 @@ export function extractPath(entities) {
   const pieces = [];
   for (const e of entities) {
     if (e.type === 'point' || e.type === 'centerline' || e.construction) continue;
-    if (e.type === 'circle' || e.type === 'rect' || e.type === 'polygon') throw new Error('A sweep path must be an open chain of lines, arcs or splines');
+    if (['circle', 'ellipse', 'rect', 'polygon'].includes(e.type)) throw new Error('A sweep path must be an open chain of lines, arcs or splines');
     for (const s of entitySegments(e)) if (d2(s.a, s.b) > 1e-9) pieces.push({ seg: s, used: false });
   }
   if (!pieces.length) throw new Error('The path sketch is empty');

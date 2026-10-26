@@ -18,6 +18,10 @@ export const SKETCH_TOOLS = {
   crect: { label: 'Center Rectangle', icon: 'crect', hint: 'Click the center, then a corner.' },
   circle: { label: 'Circle', icon: 'circle', key: 'c', hint: 'Click the center, then a point on the circle.' },
   arc: { label: '3 Point Arc', icon: 'arc', key: 'a', hint: 'Click the start point, the end point, then a point on the arc.' },
+  carc: { label: 'Centerpoint Arc', icon: 'carc', hint: 'Click the center, the start point, then the end point (counter-clockwise from the start).' },
+  tarc: { label: 'Tangent Arc', icon: 'tarc', hint: 'Click the end of a line or arc, then where the arc should end. It leaves tangent to that entity.' },
+  rect3: { label: '3 Point Rectangle', icon: 'rect3', hint: 'Click two corners along one side (any angle), then a point to set the width.' },
+  ellipse: { label: 'Ellipse', icon: 'ellipse', key: 'e', hint: 'Click the center, the end of the major axis, then a point that sets the minor radius.' },
   polygon: { label: 'Polygon', icon: 'polygon', key: 'p', hint: 'Click the center, then a vertex.' },
   slot: { label: 'Straight Slot', icon: 'slot', hint: 'Click the first center, the second center, then a point to set the width.' },
   spline: { label: 'Spline', icon: 'spline', key: 's', hint: 'Click points the curve passes through. Double-click, right-click or Esc to finish.' },
@@ -94,6 +98,14 @@ export function entityHandles(e) {
       ];
     case 'point':
       return [{ p: e.p, type: 'endpoint', handle: 'p', key: 'p' }];
+    case 'ellipse': {
+      const u = [Math.cos(e.rot), Math.sin(e.rot)], v = [-u[1], u[0]];
+      return [
+        { p: e.c, type: 'center', handle: 'c', key: 'c' },
+        { p: [e.c[0] + u[0] * e.rx, e.c[1] + u[1] * e.rx], type: 'quadrant', handle: 'ma', key: null },
+        { p: [e.c[0] + v[0] * e.ry, e.c[1] + v[1] * e.ry], type: 'quadrant', handle: 'mi', key: null },
+      ];
+    }
     case 'spline':
       return e.pts.map((p, i) => ({ p, type: i === 0 || i === e.pts.length - 1 ? 'endpoint' : 'control', handle: `s${i}`, key: `s${i}` }));
     default:
@@ -123,6 +135,11 @@ export function setHandle(e, handle, p) {
       else { e.r = Math.max(1e-3, dist(e.c, P)); e.rot = Math.atan2(P[1] - e.c[1], P[0] - e.c[0]); }
       break;
     case 'point': e.p = P; break;
+    case 'ellipse':
+      if (handle === 'c') e.c = P;
+      else if (handle === 'ma') { e.rx = Math.max(1e-3, dist(e.c, P)); e.rot = Math.atan2(P[1] - e.c[1], P[0] - e.c[0]); }
+      else { const u = [Math.cos(e.rot), Math.sin(e.rot)]; e.ry = Math.max(1e-3, Math.abs(-(P[0] - e.c[0]) * u[1] + (P[1] - e.c[1]) * u[0])); }
+      break;
     case 'spline': e.pts[Number(handle.slice(1))] = P; break;
     default: break;
   }
@@ -146,6 +163,44 @@ export function slotEntities(c1, c2, p) {
     ],
     arcs: [arcFrom3(at(c1, n, -r), at(c1, n, r), at(c1, d, -r)), arcFrom3(at(c2, n, r), at(c2, n, -r), at(c2, d, r))],
   };
+}
+
+// Shapes defined by three clicks: ellipse (center, major end, minor point), centerpoint arc
+// (center, start, end) and 3-point rectangle (edge start, edge end, width point).
+export function threeClickShape(tool, p1, p2, p3) {
+  if (tool === 'ellipse') {
+    const rx = dist(p1, p2);
+    if (rx < 1e-6) return null;
+    const rot = Math.atan2(p2[1] - p1[1], p2[0] - p1[0]);
+    const ry = Math.abs(-(p3[0] - p1[0]) * Math.sin(rot) + (p3[1] - p1[1]) * Math.cos(rot));
+    return ry < 1e-6 ? null : { type: 'ellipse', c: [...p1], rx, ry, rot };
+  }
+  if (tool === 'carc') {
+    const r = dist(p1, p2);
+    if (r < 1e-6) return null;
+    return { type: 'arc', c: [...p1], r, a0: Math.atan2(p2[1] - p1[1], p2[0] - p1[0]), a1: Math.atan2(p3[1] - p1[1], p3[0] - p1[0]) };
+  }
+  if (tool === 'rect3') {
+    const d = norm2(sub2(p2, p1)), n = perp2(d);
+    const w = (p3[0] - p1[0]) * n[0] + (p3[1] - p1[1]) * n[1];
+    if (dist(p1, p2) < 1e-6 || Math.abs(w) < 1e-6) return null;
+    const q = [p1, p2, [p2[0] + n[0] * w, p2[1] + n[1] * w], [p1[0] + n[0] * w, p1[1] + n[1] * w]];
+    return q.map((a, i) => ({ type: 'line', a: [...a], b: [...q[(i + 1) % 4]] }));
+  }
+  return null;
+}
+
+// Arc starting at P leaving in direction t (unit), ending at Q.
+export function tangentArc(P, t, Q) {
+  const n = [-t[1], t[0]];
+  const d = sub2(Q, P);
+  const dn = d[0] * n[0] + d[1] * n[1];
+  if (Math.abs(dn) < 1e-9) return null;
+  const r = (d[0] * d[0] + d[1] * d[1]) / (2 * dn);
+  const c = [P[0] + n[0] * r, P[1] + n[1] * r];
+  const a0 = Math.atan2(P[1] - c[1], P[0] - c[0]), a1 = Math.atan2(Q[1] - c[1], Q[0] - c[0]);
+  // r > 0: Q is left of the tangent, so the arc runs counter-clockwise from P
+  return r > 0 ? { type: 'arc', c, r, a0, a1 } : { type: 'arc', c, r: -r, a0: a1, a1: a0 };
 }
 
 // ---------------------------------------------------------------- intersections (for trim)
@@ -811,6 +866,35 @@ export class Sketcher {
       case 'point':
         this.addEntity({ type: 'point', p }, s.ref ? [coincident(s.ref, 'p')] : []);
         break;
+      case 'ellipse':
+      case 'carc':
+      case 'rect3': {
+        if (pts.length < 2) { if (!pts.length || dist(pts[pts.length - 1].p, p) > 1e-6) this.pts = [...pts, { p, ref: s.ref }]; break; }
+        const shape = threeClickShape(this.tool, pts[0].p, pts[1].p, p);
+        if (shape) this.addThreeClickShape(this.tool, shape, pts);
+        this.pts = [];
+        this.previewGroup.clear();
+        break;
+      }
+      case 'tarc': {
+        if (!pts.length) {
+          const tan = this.tangentAt(s);
+          if (!tan) { this.app.toast('Start the tangent arc on the end of a line or arc'); break; }
+          this.pts = [{ p: s.p, ref: s.ref, tangent: tan }];
+          break;
+        }
+        const arc = tangentArc(pts[0].p, pts[0].tangent, p);
+        if (arc) {
+          const startKey = dist(arcEnds(arc)[0], pts[0].p) < 1e-6 ? 'p0' : 'p1';
+          const rel = [coincident(pts[0].ref, startKey)];
+          if (this.entities[pts[0].ref.e].type === 'line') rel.push((i) => ({ type: 'tangent', e1: pts[0].ref.e, e2: i }));
+          if (s.ref) rel.push(coincident(s.ref, startKey === 'p0' ? 'p1' : 'p0'));
+          this.addEntity(arc, rel);
+        }
+        this.pts = [];
+        this.previewGroup.clear();
+        break;
+      }
       case 'spline':
         if (pts.length && dist(pts[pts.length - 1].p, p) < 1e-6) break;
         this.pts = [...pts, { p, ref: s.ref }];
@@ -826,6 +910,44 @@ export class Sketcher {
       default: break;
     }
     this.redraw();
+  }
+
+  addThreeClickShape(tool, shape, pts) {
+    if (tool === 'rect3') {
+      this.pushUndo();
+      const b = this.entities.length;
+      this.entities.push(...shape);
+      const C = this.constraints;
+      for (let k = 0; k < 4; k++) C.push({ type: 'coincident', p1: { e: b + k, p: 'b' }, p2: { e: b + ((k + 1) % 4), p: 'a' } });
+      C.push({ type: 'perpendicular', e1: b, e2: b + 1 }, { type: 'parallel', e1: b, e2: b + 2 }, { type: 'parallel', e1: b + 1, e2: b + 3 });
+      if (pts[0].ref) C.push({ type: 'coincident', p1: { e: b, p: 'a' }, p2: pts[0].ref });
+      if (pts[1].ref) C.push({ type: 'coincident', p1: { e: b, p: 'b' }, p2: pts[1].ref });
+      this.resolve();
+      this.changed();
+      return;
+    }
+    const rel = [];
+    if (pts[0].ref) rel.push((i) => ({ type: 'coincident', p1: { e: i, p: 'c' }, p2: pts[0].ref }));
+    if (tool === 'carc' && pts[1].ref) rel.push((i) => ({ type: 'coincident', p1: { e: i, p: 'p0' }, p2: pts[1].ref }));
+    this.addEntity(shape, rel);
+  }
+
+  // Outward tangent direction at a snapped line/arc endpoint (for tangent arcs).
+  tangentAt(s) {
+    const ref = s.ref;
+    const e = ref && ref.e >= 0 ? this.entities[ref.e] : null;
+    if (!e) return null;
+    if (e.type === 'line' && (ref.p === 'a' || ref.p === 'b')) {
+      const from = ref.p === 'b' ? e.a : e.b, to = ref.p === 'b' ? e.b : e.a;
+      return norm2(sub2(to, from));
+    }
+    if (e.type === 'arc' && (ref.p === 'p0' || ref.p === 'p1')) {
+      const ang = ref.p === 'p1' ? e.a1 : e.a0;
+      const radial = [Math.cos(ang), Math.sin(ang)];
+      // leaving the end of a CCW arc continues counter-clockwise; leaving its start goes clockwise
+      return ref.p === 'p1' ? [-radial[1], radial[0]] : [radial[1], -radial[0]];
+    }
+    return null;
   }
 
   // Straight slot: two lines + two arcs held by coincident, tangent and equal relations.
@@ -1203,6 +1325,22 @@ export class Sketcher {
           ents = [this.makeEntity(this.tool, a, p)];
           label = `R: ${units.fmt(dist(a, p))}`;
           break;
+        case 'ellipse':
+        case 'carc':
+        case 'rect3': {
+          if (pts.length === 1) { ents = [{ type: 'line', a, b: p }]; label = `${this.tool === 'carc' ? 'R' : 'L'}: ${units.fmt(dist(a, p))}`; break; }
+          const sh = threeClickShape(this.tool, pts[0], pts[1], p);
+          if (sh) {
+            ents = Array.isArray(sh) ? sh : [sh];
+            label = this.tool === 'ellipse' ? `${units.fmt(sh.rx * 2, false)} × ${units.fmt(sh.ry * 2)}` : this.tool === 'carc' ? `R: ${units.fmt(sh.r)}` : `W: ${units.fmt(dist(sh[1].a, sh[1].b))}`;
+          }
+          break;
+        }
+        case 'tarc': {
+          const arc = tangentArc(a, this.pts[0].tangent, p);
+          if (arc) { ents = [arc]; label = `R: ${units.fmt(arc.r)}`; }
+          break;
+        }
         case 'spline':
           ents = [{ type: 'spline', pts: [...pts, p] }];
           label = `${pts.length + 1} points — double-click to finish`;
