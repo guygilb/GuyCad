@@ -1525,7 +1525,8 @@ export class Sketcher {
           { multi: ps.map((p) => ({ type: 'perpendicular', ...p })), type: 'perpendicular' },
           { multi: ps.map((p) => ({ type: 'equal', ...p })), type: 'equal' },
           { multi: L.map((x) => ({ type: 'horizontal', e: x.i })), type: 'horizontal' },
-          { multi: L.map((x) => ({ type: 'vertical', e: x.i })), type: 'vertical' });
+          { multi: L.map((x) => ({ type: 'vertical', e: x.i })), type: 'vertical' },
+          { multi: ps.map((p) => ({ type: 'collinear', ...p })), type: 'collinear' });
       }
       if (ents.length >= 2 && R.length === ents.length) {
         const ps = R.slice(1).map((x) => ({ e1: R[0].i, e2: x.i }));
@@ -1541,6 +1542,9 @@ export class Sketcher {
     }
     if (pts.length === 2 && !ents.length) {
       out.push({ type: 'coincident', p1: pts[0], p2: pts[1] }, { type: 'horizontal', p1: pts[0], p2: pts[1] }, { type: 'vertical', p1: pts[0], p2: pts[1] });
+    }
+    if (pts.length === 2 && ents.length === 1 && L.length === 1) {
+      out.push({ type: 'symmetric', p1: pts[0], p2: pts[1], e: L[0].i });
     }
     if (pts.length === 1 && ents.length === 1) {
       if (L.length) out.push({ type: 'onLine', p: pts[0], e: L[0].i }, { type: 'midpoint', p: pts[0], e: L[0].i });

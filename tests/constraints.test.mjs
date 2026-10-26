@@ -71,3 +71,12 @@ const remapped = remapAfterDelete(loop, new Set([1]));
 const idx = remapped.flatMap((c) => [c.e, c.p1?.e, c.p2?.e]).filter((v) => v != null);
 check('delete remaps constraints', remapped.length === 5 && Math.max(...idx) === 2 && remapped.some((c) => c.type === 'vertical' && c.e === 2), JSON.stringify(remapped.map((c) => c.type)));
 check('legacy sketches get coincidences', inferCoincidences(ents()).length === 4);
+
+// collinear and symmetric
+const e4 = [{ type: 'line', a: [0, 0], b: [10, 1] }, { type: 'line', a: [15, 3], b: [25, 2] }];
+res = solve(e4, [{ type: 'collinear', e1: 0, e2: 1 }]);
+const cr = (p) => (e4[0].b[0] - e4[0].a[0]) * (p[1] - e4[0].a[1]) - (e4[0].b[1] - e4[0].a[1]) * (p[0] - e4[0].a[0]);
+check('collinear', res.ok && near(cr(e4[1].a), 0) && near(cr(e4[1].b), 0));
+const e5 = [{ type: 'centerline', a: [0, -10], b: [0, 10] }, { type: 'point', p: [4, 1] }, { type: 'point', p: [-6, 3] }];
+res = solve(e5, [{ type: 'fix', p: { e: 0, p: 'a' }, at: [0, -10] }, { type: 'fix', p: { e: 0, p: 'b' }, at: [0, 10] }, { type: 'symmetric', p1: { e: 1, p: 'p' }, p2: { e: 2, p: 'p' }, e: 0 }]);
+check('symmetric about a centerline', res.ok && near(e5[1].p[0], -e5[2].p[0]) && near(e5[1].p[1], e5[2].p[1]), JSON.stringify([e5[1].p, e5[2].p]));

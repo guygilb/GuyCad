@@ -162,6 +162,18 @@ function residuals(c, V) {
       const r1 = V.radius(c.e1), r2 = V.radius(c.e2);
       return [c.inner ? dc - Math.abs(r1 - r2) : dc - (r1 + r2)];
     }
+    case 'collinear': {
+      const [a, b] = V.line(c.e1), [p, q] = V.line(c.e2);
+      const d = sub(b, a), L = len(d) || 1;
+      return [cross(d, sub(p, a)) / L, cross(d, sub(q, a)) / L];
+    }
+    case 'symmetric': {
+      // p1 and p2 mirror each other about line e: midpoint on the line, segment perpendicular to it
+      const p = V.point(c.p1), q = V.point(c.p2), [a, b] = V.line(c.e);
+      const d = sub(b, a), L = len(d) || 1;
+      const m = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+      return [cross(d, sub(m, a)) / L, dot(sub(q, p), d) / L];
+    }
     case 'midpoint': {
       const p = V.point(c.p), [a, b] = V.line(c.e);
       return [p[0] - (a[0] + b[0]) / 2, p[1] - (a[1] + b[1]) / 2];
@@ -420,11 +432,11 @@ export function inferCoincidences(entities) {
 export const RELATION_LABELS = {
   coincident: 'Coincident', horizontal: 'Horizontal', vertical: 'Vertical', parallel: 'Parallel',
   perpendicular: 'Perpendicular', equal: 'Equal', concentric: 'Concentric', tangent: 'Tangent',
-  midpoint: 'Midpoint', onLine: 'Coincident (on line)', onCircle: 'Coincident (on circle)', fix: 'Fix',
+  collinear: 'Collinear', symmetric: 'Symmetric', midpoint: 'Midpoint', onLine: 'Coincident (on line)', onCircle: 'Coincident (on circle)', fix: 'Fix',
   distance: 'Distance', length: 'Length', radius: 'Radius', diameter: 'Diameter', angle: 'Angle', pointLine: 'Distance',
 };
 
 export const RELATION_GLYPHS = {
   horizontal: '—', vertical: '|', parallel: '∥', perpendicular: '⊥', equal: '=', concentric: '◎',
-  tangent: 'T', midpoint: 'M', fix: '⚓', coincident: '•', onLine: '•', onCircle: '•',
+  tangent: 'T', midpoint: 'M', collinear: '⋯', symmetric: '⇹', fix: '⚓', coincident: '•', onLine: '•', onCircle: '•',
 };
