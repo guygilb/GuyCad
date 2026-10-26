@@ -9,7 +9,7 @@ import { USDZExporter } from 'three/examples/jsm/exporters/USDZExporter.js';
 import { make3MF, sketchToDXF } from './exporters.js';
 import { DrawingMixin } from './drawing-ui.js';
 import { Viewport, VIEWS, DISPLAY_STYLES } from './viewport.js';
-import { Sketcher, SKETCH_TOOLS, buildSketchObject } from './sketcher.js';
+import { Sketcher, SKETCH_TOOLS, buildSketchObject, refPoint } from './sketcher.js';
 import { STD_PLANES, frameFromNormal, frameMatrix, resolvePlane, revolveAxisOptions, extractLoops, computeFrames } from './geometry.js';
 import { RELATION_LABELS, DIMENSION_TYPES } from './constraints.js';
 import { KernelClient } from './kernel/client.js';
@@ -1925,12 +1925,34 @@ export class App {
         this.fieldNumber('Radius', () => this.settings.sketchFilletRadius, (v) => { this.settings.sketchFilletRadius = Math.max(0.001, v); this.saveSettings(); }, { min: 0.001 })));
     }
     if (sk.selected.size) {
+      const mo = this.modifyOpts || (this.modifyOpts = { dx: 20, dy: 0, deg: 90, s: 2, copy: false, count: 3, total: 360 });
+      // rotations, scales and circular patterns use the one selected point, else the sketch origin
+      const center = () => (sk.selPoints.length === 1 ? refPoint(sk.entities, sk.selPoints[0]) : [0, 0]);
+      const btn = (label, fn) => h('button', { class: 'pm-button', onclick: fn }, label);
       body.append(this.pmGroup('Modify Entities',
+        this.fieldNumber('ΔX', () => mo.dx, (v) => { mo.dx = v; }), this.fieldNumber('ΔY', () => mo.dy, (v) => { mo.dy = v; }),
+        this.fieldNumber('Angle', () => mo.deg, (v) => { mo.deg = v; }, { unit: 'deg' }),
+        this.fieldNumber('Scale factor', () => mo.s, (v) => { mo.s = v; }, { unit: 'ratio', min: 0.001 }),
+        this.fieldCheck('Keep originals (copy)', () => mo.copy, (v) => { mo.copy = v; }),
+        h('div', { class: 'rel-buttons' },
+          btn('Move / Copy', () => sk.transformSelected({ dx: mo.dx, dy: mo.dy, copy: mo.copy })),
+          btn('Rotate', () => sk.transformSelected({ deg: mo.deg, center: center(), copy: mo.copy })),
+          btn('Scale', () => sk.transformSelected({ s: mo.s, center: center(), copy: mo.copy }))),
+        h('div', { class: 'pm-info' }, 'Rotate and Scale pivot about the selected point (Shift+click one), or the origin.'),
         this.fieldNumber('Offset distance', () => this.settings.offsetDistance, (v) => { this.settings.offsetDistance = Math.max(0.001, v); this.saveSettings(); }, { min: 0.001 }),
         h('div', { class: 'rel-buttons' },
-          h('button', { class: 'pm-button', onclick: () => sk.offsetSelected(this.settings.offsetDistance, false) }, 'Offset'),
-          h('button', { class: 'pm-button', onclick: () => sk.offsetSelected(this.settings.offsetDistance, true) }, 'Offset (other side)'),
-          h('button', { class: 'pm-button', onclick: () => sk.mirrorSelected() }, 'Mirror about centerline'))));
+          btn('Offset', () => sk.offsetSelected(this.settings.offsetDistance, false)),
+          btn('Offset (other side)', () => sk.offsetSelected(this.settings.offsetDistance, true)),
+          btn('Mirror about centerline', () => sk.mirrorSelected()))));
+      body.append(this.pmGroup('Sketch Patterns',
+        this.fieldNumber('Instances', () => mo.count, (v) => { mo.count = Math.max(2, Math.round(v)); }, { unit: 'int', min: 2 }),
+        this.fieldNumber('Total angle', () => mo.total, (v) => { mo.total = v; }, { unit: 'deg' }),
+        h('div', { class: 'rel-buttons' },
+          btn('Linear pattern (ΔX, ΔY)', () => sk.transformSelected({ dx: mo.dx, dy: mo.dy, copy: true, count: mo.count - 1 })),
+          btn('Circular pattern', () => {
+            const full = Math.abs(Math.abs(mo.total) - 360) < 1e-9;
+            sk.transformSelected({ deg: mo.total / (full ? mo.count : mo.count - 1), center: center(), copy: true, count: mo.count - 1 });
+          }))));
     }
     body.append(this.pmGroup('Grid & Snap',
       this.fieldCheck('Show grid', () => this.settings.showGrid, (v) => { this.settings.showGrid = v; this.sketcher.gridSig = ''; this.saveSettings(); this.refreshChrome(); }),

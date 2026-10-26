@@ -145,6 +145,30 @@ export function setHandle(e, handle, p) {
   }
 }
 
+// A copy of entity e with points mapped by `map`, rotated by `rad` and scaled by `s`
+// (map must be the matching similarity transform).
+export function transformEntity(e, map, rad, s) {
+  const c = clone(e);
+  switch (e.type) {
+    case 'line': case 'centerline': c.a = map(e.a); c.b = map(e.b); break;
+    case 'circle': c.c = map(e.c); c.r = e.r * s; break;
+    case 'arc': c.c = map(e.c); c.r = e.r * s; c.a0 = e.a0 + rad; c.a1 = e.a1 + rad; break;
+    case 'ellipse': c.c = map(e.c); c.rx = e.rx * s; c.ry = e.ry * s; c.rot = e.rot + rad; break;
+    case 'polygon': c.c = map(e.c); c.r = e.r * s; c.rot = e.rot + rad; break;
+    case 'point': c.p = map(e.p); break;
+    case 'spline': c.pts = e.pts.map(map); break;
+    case 'rect': {
+      // (legacy axis-aligned rectangles; callers refuse to rotate them)
+      const p1 = map(e.a), p2 = map(e.b);
+      c.a = [Math.min(p1[0], p2[0]), Math.min(p1[1], p2[1])];
+      c.b = [Math.max(p1[0], p2[0]), Math.max(p1[1], p2[1])];
+      break;
+    }
+    default: break;
+  }
+  return c;
+}
+
 const sub2 = (a, b) => [a[0] - b[0], a[1] - b[1]];
 const norm2 = (v) => { const l = Math.hypot(v[0], v[1]) || 1; return [v[0] / l, v[1] / l]; };
 const perp2 = (v) => [-v[1], v[0]];
@@ -1171,6 +1195,72 @@ export class Sketcher {
     this.clearSelection();
     this.changed();
     this.app.toast(`Offset ${out.length} entit${out.length === 1 ? 'y' : 'ies'}`);
+  }
+
+  // Applies a similarity transform (rotate by `deg` and scale by `s` about `center`, then move by d)
+  // to the selected entities, or to copies of them. Copies keep the relations among themselves.
+  transformSelected({ dx = 0, dy = 0, deg = 0, s = 1, center = [0, 0], copy = false, count = 1, silent = false } = {}) {
+    const sel = [...this.selected].sort((a, b) => a - b);
+    if (!sel.length) { this.app.toast('Select entities first'); return false; }
+    if (Math.abs(Math.sin((deg * Math.PI) / 180)) > 1e-9 && sel.some((i) => this.entities[i].type === 'rect')) {
+      this.app.toast('Older single-piece rectangles cannot be rotated — redraw them with the Rectangle tool', 'error');
+      return false;
+    }
+    const before = this.state();
+    this.pushUndo();
+    // horizontal/vertical relations of rotated entities: swap at 90°/270°, drop at other angles
+    const selSet = new Set(sel);
+    const quarter = (a) => ((Math.round(a / 90) % 4) + 4) % 4;
+    const adapt = (c, angle) => {
+      if (c.type !== 'horizontal' && c.type !== 'vertical') return c;
+      if (!constraintEntities(c).every((e) => selSet.has(e))) return c;
+      const r = ((angle % 180) + 180) % 180;
+      if (Math.abs(r) < 1e-9) return c;
+      if (Math.abs(r - 90) < 1e-9 && quarter(angle) % 2 === 1) return { ...c, type: c.type === 'horizontal' ? 'vertical' : 'horizontal' };
+      return null;
+    };
+    if (!copy && deg) this.feature.constraints = this.constraints.map((c) => adapt(c, deg * count)).filter(Boolean);
+    for (let k = 1; k <= count; k++) {
+      const rad = (deg * k * Math.PI) / 180, sc = s ** k;
+      const cs = Math.cos(rad), sn = Math.sin(rad);
+      const map = (p) => {
+        const x = (p[0] - center[0]) * sc, y = (p[1] - center[1]) * sc;
+        return [center[0] + x * cs - y * sn + dx * k, center[1] + x * sn + y * cs + dy * k];
+      };
+      const moved = sel.map((i) => transformEntity(this.entities[i], map, rad, sc));
+      if (copy) {
+        const base = this.entities.length;
+        const newIdx = new Map(sel.map((i, j) => [i, base + j]));
+        this.entities.push(...moved);
+        for (const c of this.constraints) {
+          if (c.type === 'fix' || c.hidden) continue;
+          const ents = constraintEntities(c);
+          const refs = [c.p, c.p1, c.p2].filter(Boolean);
+          if (!ents.length || !ents.every((e) => newIdx.has(e)) || refs.some((r) => r.e < 0)) continue;
+          const adapted = adapt(c, deg * k);
+          if (!adapted) continue;
+          const o = clone(adapted);
+          for (const key of ['e', 'e1', 'e2']) if (o[key] != null) o[key] = newIdx.get(o[key]);
+          for (const key of ['p', 'p1', 'p2']) if (o[key]) o[key].e = newIdx.get(o[key].e);
+          if (o.pos) o.pos = map(o.pos);
+          this.constraints.push(o);
+        }
+      } else {
+        sel.forEach((i, j) => { this.entities[i] = moved[j]; });
+        for (const c of this.constraints) if (c.pos && constraintEntities(c).some((e) => sel.includes(e))) c.pos = map(c.pos);
+      }
+    }
+    if (!this.resolve().ok) {
+      this.undoStack.pop();
+      this.restore(before);
+      this.changed();
+      this.app.toast('Relations or dimensions prevent this change (e.g. a Fix or a link to the origin)', 'error');
+      return false;
+    }
+    if (copy) this.clearSelection();
+    this.changed();
+    if (!silent) this.app.toast(copy ? `Created ${sel.length * count} entit${sel.length * count === 1 ? 'y' : 'ies'}` : 'Done');
+    return true;
   }
 
   // Mirrors the selected entities about the selected (or only) centerline.

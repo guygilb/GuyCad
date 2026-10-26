@@ -75,3 +75,21 @@ const r3 = threeClickShape('rect3', [0, 0], [10, 10], [0, 5]);
 check('3-point rectangle is a closed loop', extractLoops(r3).loops.length === 1);
 const ta = tangentArc([10, 0], [1, 0], [10, 20]);
 check('tangent arc leaves along the line', near(ta.r, 10) && near(ta.c[0], 10) && near(ta.c[1], 10), JSON.stringify(ta));
+
+// move / rotate / scale / patterns (relations among copies are kept)
+sk = headless([]);
+sk.addRectangle({ p: [0, 0] }, { p: [10, 5] }, false);
+sk.selected = new Set([0, 1, 2, 3]);
+check('linear sketch pattern (3 instances)', sk.transformSelected({ dx: 20, copy: true, count: 2, silent: true }) && sk.entities.length === 12 && extractLoops(sk.entities).loops.length === 3);
+check('pattern copies keep their relations', sk.constraints.filter((c) => c.type === 'horizontal').length === 6);
+sk.selected = new Set([0, 1, 2, 3]);
+sk.transformSelected({ deg: 90, center: [0, 0], silent: true });
+check('rotate 90° about the origin', near(sk.entities[0].b[0], 0) && near(sk.entities[0].b[1], 10), JSON.stringify(sk.entities[0]));
+sk = headless([{ type: 'circle', c: [10, 0], r: 2 }]);
+sk.selected = new Set([0]);
+sk.transformSelected({ deg: 90, center: [0, 0], copy: true, count: 3, silent: true });
+check('circular sketch pattern', sk.entities.length === 4 && near(sk.entities[2].c[0], -10) && near(sk.entities[3].c[1], -10));
+sk = headless([{ type: 'circle', c: [10, 0], r: 2 }]);
+sk.selected = new Set([0]);
+sk.transformSelected({ s: 2, center: [0, 0], silent: true });
+check('scale about the origin', near(sk.entities[0].c[0], 20) && near(sk.entities[0].r, 4));
