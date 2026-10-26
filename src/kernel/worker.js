@@ -2,7 +2,7 @@
 import opencascade from 'replicad-opencascadejs';
 import wasmUrl from 'replicad-opencascadejs/wasm?url';
 import { setOC, makeCompound, measureShapeVolumeProperties } from 'replicad';
-import { rebuildPart, serializeShape, exportShape } from './part.js';
+import { rebuildPart, serializeShape, exportShape, projectViews } from './part.js';
 
 const ready = opencascade({ locateFile: () => wasmUrl }).then((oc) => { setOC(oc); });
 
@@ -10,8 +10,8 @@ const ready = opencascade({ locateFile: () => wasmUrl }).then((oc) => { setOC(oc
 const partMeshes = new Map();
 
 // { doc, limit?, pose?: { position, axis, angle(deg) } } -> solid placed in the assembly
-function placedShape(d) {
-  const r = rebuildPart(d.doc, d.limit ?? null);
+async function placedShape(d) {
+  const r = await rebuildPart(d.doc, d.limit ?? null);
   if (!r.shape) return null;
   let s = r.shape.clone();
   if (d.pose) {
@@ -32,7 +32,7 @@ async function handle(op, p) {
     case 'ping':
       return 'ok';
     case 'rebuild': {
-      const r = rebuildPart(p.doc, p.limit);
+      const r = await rebuildPart(p.doc, p.limit);
       const data = r.shape ? serializeShape(r.shape) : null;
       return { result: { data, planes: r.planes, frames: r.frames, errors: r.errors, times: r.times }, transfer: transferables(data) };
     }
@@ -40,7 +40,7 @@ async function handle(op, p) {
       const key = JSON.stringify(p.doc.features);
       let entry = partMeshes.get(key);
       if (!entry) {
-        const r = rebuildPart(p.doc, null);
+        const r = await rebuildPart(p.doc, null);
         entry = { data: r.shape ? serializeShape(r.shape) : null, errors: r.errors };
         partMeshes.set(key, entry);
         if (partMeshes.size > 40) partMeshes.delete(partMeshes.keys().next().value);
@@ -49,8 +49,14 @@ async function handle(op, p) {
       const data = entry.data && Object.fromEntries(Object.entries(entry.data).map(([k, v]) => [k, ArrayBuffer.isView(v) ? v.slice() : v]));
       return { result: { data, errors: entry.errors }, transfer: transferables(data) };
     }
+    case 'drawing': {
+      const shapes = (await Promise.all(p.docs.map((d) => placedShape(d)))).filter(Boolean);
+      if (!shapes.length) throw new Error('The model has no solid body');
+      const shape = shapes.length > 1 ? makeCompound(shapes) : shapes[0];
+      return { result: projectViews(shape, p.views) };
+    }
     case 'interference': {
-      const shapes = p.docs.map((d) => placedShape(d));
+      const shapes = await Promise.all(p.docs.map((d) => placedShape(d)));
       const out = [];
       for (let i = 0; i < shapes.length; i++) {
         for (let j = i + 1; j < shapes.length; j++) {
@@ -69,7 +75,7 @@ async function handle(op, p) {
     }
     case 'export': {
       // each entry: { doc, limit?, pose?: { position, axis, angle(deg) } } — poses place assembly components
-      const shapes = p.docs.map((d) => placedShape(d)).filter(Boolean);
+      const shapes = (await Promise.all(p.docs.map((d) => placedShape(d)))).filter(Boolean);
       if (!shapes.length) throw new Error('There is no solid body to export');
       const shape = shapes.length > 1 ? makeCompound(shapes) : shapes[0];
       const blob = exportShape(shape, p.format);

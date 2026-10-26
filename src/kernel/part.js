@@ -1,7 +1,11 @@
 // OpenCascade (replicad) part kernel: rebuilds the feature history into an exact B-rep solid
 // and serializes it into render/pick data. Runs in a Web Worker in the app and in Node for tests.
-import { draw, drawCircle, Plane, getOC, measureShapeVolumeProperties, measureArea, EdgeFinder, FaceFinder } from 'replicad';
-import { computeFrames, sketchRegions, frameToWorld, planeFeatureFrame, resolvePlane, STD_PLANES } from '../geometry.js';
+import {
+  draw, drawCircle, Plane, getOC, measureShapeVolumeProperties, measureArea, EdgeFinder, FaceFinder,
+  makeLine, makeThreePointArc, makeBezierCurve, makeCircle, assembleWire, genericSweep,
+  importSTEP, importSTL, deserializeShape, makeProjectedEdges, ProjectionCamera,
+} from 'replicad';
+import { computeFrames, sketchRegions, frameToWorld, planeFeatureFrame, resolvePlane, extractPath, STD_PLANES } from '../geometry.js';
 
 const AXES = { X: [1, 0, 0], Y: [0, 1, 0], Z: [0, 0, 1] };
 const add = (a, b, s = 1) => [a[0] + b[0] * s, a[1] + b[1] * s, a[2] + b[2] * s];
@@ -13,8 +17,35 @@ const REF_TOL = 0.02; // mm: how far a stored edge/face reference point may drif
 function loopDrawing(loop) {
   if (loop.circle) return drawCircle(loop.circle.r).translate(loop.circle.c[0], loop.circle.c[1]);
   let pen = draw(loop.segs[0].a);
-  for (const s of loop.segs) pen = s.kind === 'line' ? pen.lineTo(s.b) : pen.threePointsArcTo(s.b, s.m);
+  for (const s of loop.segs) {
+    if (s.kind === 'line') pen = pen.lineTo(s.b);
+    else if (s.kind === 'arc') pen = pen.threePointsArcTo(s.b, s.m);
+    else pen = pen.cubicBezierCurveTo(s.b, s.c1, s.c2);
+  }
   return pen.close();
+}
+
+// 3D wire of sketch segments placed on a frame (sweep paths and profiles).
+function segmentsWire(segs, frame) {
+  const w = (p) => frameToWorld(frame, p);
+  const edges = segs.map((s) => {
+    if (s.kind === 'line') return makeLine(w(s.a), w(s.b));
+    if (s.kind === 'arc') return makeThreePointArc(w(s.a), w(s.m), w(s.b));
+    return makeBezierCurve([w(s.a), w(s.c1), w(s.c2), w(s.b)]);
+  });
+  return assembleWire(edges);
+}
+
+function loopWire(loop, frame) {
+  if (loop.circle) return assembleWire([makeCircle(loop.circle.r, frameToWorld(frame, loop.circle.c), frame.normal)]);
+  return segmentsWire(loop.segs, frame);
+}
+
+function decodeBase64(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 const occPlane = (frame, z = 0) => new Plane(add(frame.origin, frame.normal, z), frame.xDir, frame.normal);
@@ -64,7 +95,7 @@ function hashStr(s, seed = 0) {
 
 export function clearCache() { cache.clear(); }
 
-export function rebuildPart(doc, limit = null) {
+export async function rebuildPart(doc, limit = null) {
   const end = limit ?? doc.features.length;
   const { planes, frames } = computeFrames(doc, end);
   const errors = {}, times = {};
@@ -88,7 +119,7 @@ export function rebuildPart(doc, limit = null) {
     let error = null;
     if (!f.suppressed) {
       try {
-        const res = applyFeature(f, { body, tools, planes, frames, byId });
+        const res = await applyFeature(f, { body, tools, planes, frames, byId });
         if (res) { body = res.body; tools = { ...tools, ...(res.tools ? { [f.id]: res.tools } : {}) }; }
       } catch (e) {
         error = e?.message || String(e);
@@ -111,7 +142,7 @@ function applyOp(body, tool, cut) {
   return cut ? body.cut(tool) : body.fuse(tool);
 }
 
-function applyFeature(f, ctx) {
+async function applyFeature(f, ctx) {
   const { byId, frames, planes } = ctx;
   const sketchOf = () => {
     const s = byId[f.sketch];
@@ -166,6 +197,89 @@ function applyFeature(f, ctx) {
       const angle = Math.min(Math.max(f.angle, 0.1), 360);
       const tool = regionSolids(s.entities, (dr) => dr.sketchOnPlane(occPlane(frame)).revolve(axis, { origin, angle }));
       return { body: applyOp(ctx.body, tool, f.cut), tools: [{ shape: tool, cut: !!f.cut }] };
+    }
+
+    case 'sweep': {
+      const prof = byId[f.profile], path = byId[f.path];
+      if (!prof || !frames[prof.id]) throw new Error('Profile sketch is missing');
+      if (!path || !frames[path.id]) throw new Error('Path sketch is missing');
+      const regions = sketchRegions(prof.entities);
+      const spine = segmentsWire(extractPath(path.entities), frames[path.id]);
+      const sweepLoop = (loop) => genericSweep(loopWire(loop, frames[prof.id]), spine, { transitionMode: 'round', frenet: !!f.frenet }, false);
+      let tool = null;
+      for (const r of regions) {
+        let s = sweepLoop(r.outer);
+        for (const hl of r.holes) s = s.cut(sweepLoop(hl));
+        tool = tool ? tool.fuse(s) : s;
+      }
+      return { body: applyOp(ctx.body, tool, f.cut), tools: [{ shape: tool, cut: !!f.cut }] };
+    }
+
+    case 'loft': {
+      const secs = (f.sections || []).map((id) => byId[id]);
+      if (secs.length < 2) throw new Error('Select at least two profile sketches');
+      const sketches = secs.map((s) => {
+        if (!s || !frames[s.id]) throw new Error('A profile sketch is missing');
+        const regions = sketchRegions(s.entities);
+        if (regions.length !== 1 || regions[0].holes.length) throw new Error(`${s.name} must contain exactly one closed profile without holes`);
+        return loopDrawing(regions[0].outer).sketchOnPlane(occPlane(frames[s.id]));
+      });
+      const tool = sketches[0].loftWith(sketches.slice(1), { ruled: !!f.ruled });
+      return { body: applyOp(ctx.body, tool, f.cut), tools: [{ shape: tool, cut: !!f.cut }] };
+    }
+
+    case 'draft': {
+      needBody('draft');
+      if (!f.faces?.length) throw new Error('Select the faces to draft');
+      const neutral = resolvePlane(f.neutral || 'Top', f.neutralFrame, planes);
+      const pick = (ff) => ff.either(f.faces.map((p) => (q) => q.near(p, REF_TOL)));
+      const found = pick(new FaceFinder()).find(ctx.body).length;
+      if (found < f.faces.length) throw new Error(`${f.faces.length - found} selected face(s) no longer exist — edit the feature and reselect`);
+      const out = ctx.body.draft(f.angle * (f.reverse ? -1 : 1), pick, occPlane(neutral));
+      return { body: out };
+    }
+
+    case 'hole': {
+      needBody('cut holes in');
+      const s = byId[f.sketch];
+      if (!s || !frames[s.id]) throw new Error('Position sketch is missing');
+      const frame = frames[s.id];
+      const centers = s.entities.filter((e) => e.type === 'point' || e.type === 'circle').map((e) => (e.type === 'point' ? e.p : e.c));
+      if (!centers.length) throw new Error('Add sketch points (or circles) to mark the hole positions');
+      const n = frame.normal.map((v) => (f.reverse ? v : -v)); // drill into the material
+      const r = f.diameter / 2;
+      const depth = f.through ? bodyDiagonal(ctx.body).size * 2 : f.depth;
+      const e = 0.5; // start slightly above the face for a clean cut
+      const tip = f.through ? 0 : r / Math.tan((118 / 2) * Math.PI / 180);
+      let prof;
+      if (f.holeType === 'cbore') {
+        const R = f.cboreDiameter / 2;
+        if (R <= r) throw new Error('Counterbore diameter must be larger than the hole');
+        prof = [[0, -e], [R, -e], [R, f.cboreDepth], [r, f.cboreDepth], [r, depth], [0, depth + tip]];
+      } else if (f.holeType === 'csink') {
+        const R = f.csinkDiameter / 2;
+        if (R <= r) throw new Error('Countersink diameter must be larger than the hole');
+        const cd = (R - r) / Math.tan((f.csinkAngle / 2) * Math.PI / 180);
+        prof = [[0, -e], [R, -e], [R, 0], [r, cd], [r, depth], [0, depth + tip]];
+      } else {
+        prof = [[0, -e], [r, -e], [r, depth], [0, depth + tip]];
+      }
+      let tool = null;
+      for (const c of centers) {
+        const P = frameToWorld(frame, c);
+        const u = frame.xDir;
+        const z = [u[1] * n[2] - u[2] * n[1], u[2] * n[0] - u[0] * n[2], u[0] * n[1] - u[1] * n[0]];
+        let pen = draw(prof[0]);
+        for (const q of prof.slice(1)) pen = pen.lineTo(q);
+        const solid = pen.close().sketchOnPlane(new Plane(P, u, z)).revolve(n, { origin: P });
+        tool = tool ? tool.fuse(solid) : solid;
+      }
+      return { body: applyOp(ctx.body, tool, true), tools: [{ shape: tool, cut: true }] };
+    }
+
+    case 'import': {
+      const shape = await importedShape(f);
+      return { body: applyOp(ctx.body, shape, false), tools: [{ shape, cut: false }] };
     }
 
     case 'fillet':
@@ -297,8 +411,57 @@ export function serializeShape(shape, { tolerance = 0.01, angularTolerance = 0.1
   };
 }
 
+// ---------------------------------------------------------------- drawings
+
+// Hidden-line projections for drawing views. views: [{ id, dir, x }] where `dir` points toward the viewer.
+// Returns 2D polylines (model mm, y up) for visible and hidden edges, plus circles for dimensioning.
+export function projectViews(shape, views) {
+  return views.map((v) => {
+    const { visible, hidden } = makeProjectedEdges(shape, new ProjectionCamera([0, 0, 0], v.dir, v.x), true);
+    const circles = [];
+    const toLines = (edges, collectCircles) => edges.map((e) => {
+      const type = e.geomType;
+      const n = type === 'LINE' ? 1 : Math.max(8, Math.min(96, Math.ceil(e.length / 1.5)));
+      const out = [];
+      for (let i = 0; i <= n; i++) { const p = e.pointAt(i / n); out.push(p.x, p.y); }
+      if (collectCircles && type === 'CIRCLE' && e.isClosed) {
+        const ad = new (getOC()).BRepAdaptor_Curve(e.wrapped);
+        const c = ad.Circle(), l = c.Location();
+        circles.push({ c: [l.X(), l.Y()], r: c.Radius() });
+        ad.delete();
+      }
+      return out;
+    });
+    const vis = toLines(visible, true), hid = toLines(hidden, false);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const pl of vis) for (let i = 0; i < pl.length; i += 2) {
+      minX = Math.min(minX, pl[i]); maxX = Math.max(maxX, pl[i]); minY = Math.min(minY, pl[i + 1]); maxY = Math.max(maxY, pl[i + 1]);
+    }
+    if (!Number.isFinite(minX)) { minX = minY = 0; maxX = maxY = 1; }
+    return { id: v.id, visible: vis, hidden: hid, circles, bbox: [minX, minY, maxX, maxY] };
+  });
+}
+
+// Imported bodies are parsed once and reused across rebuilds.
+const imports = new Map();
+async function importedShape(f) {
+  const key = hashStr(f.data) + f.format;
+  if (!imports.has(key)) {
+    let shape;
+    if (f.format === 'brep') shape = deserializeShape(f.data);
+    else {
+      const blob = new Blob([decodeBase64(f.data)]);
+      shape = f.format === 'stl' ? await importSTL(blob) : await importSTEP(blob);
+    }
+    if (!shape || !shape.faces?.length) throw new Error('The imported file contains no solid geometry');
+    imports.set(key, shape);
+  }
+  return imports.get(key);
+}
+
 export function exportShape(shape, format) {
   if (format === 'step') return shape.blobSTEP();
+  if (format === 'brep') return new Blob([shape.serialize()], { type: 'text/plain' });
   if (format === 'stl') return shape.blobSTL({ binary: true, tolerance: 0.01, angularTolerance: 0.1 });
   throw new Error(`Unknown export format ${format}`);
 }

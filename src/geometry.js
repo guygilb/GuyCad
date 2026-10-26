@@ -103,12 +103,40 @@ export function polygonVertices(e) {
   return pts;
 }
 
+// A spline through points, as Catmull-Rom cubic Béziers: [{ a, c1, c2, b }].
+// The same curves are drawn in the sketch and built by the kernel, so they match exactly.
+export function splineBeziers(pts) {
+  const out = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
+    out.push({
+      a: [...p1], b: [...p2],
+      c1: [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6],
+      c2: [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6],
+    });
+  }
+  return out;
+}
+
+export function bezierPoint(s, t) {
+  const u = 1 - t;
+  const w = [u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t];
+  return [0, 1].map((k) => w[0] * s.a[k] + w[1] * s.c1[k] + w[2] * s.c2[k] + w[3] * s.b[k]);
+}
+
 // Polyline (array of [x, y]) for display, hit-testing and nesting tests.
 export function entityPoints(e, seg = 72) {
   switch (e.type) {
     case 'line':
     case 'centerline':
       return [e.a, e.b];
+    case 'point':
+      return [e.p];
+    case 'spline': {
+      const pts = [e.pts[0]];
+      for (const s of splineBeziers(e.pts)) for (let i = 1; i <= 16; i++) pts.push(bezierPoint(s, i / 16));
+      return pts;
+    }
     case 'rect': {
       const [x0, y0] = e.a, [x1, y1] = e.b;
       return [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]];
@@ -170,11 +198,13 @@ function entitySegments(e) {
       const v = polygonVertices(e);
       return v.map((q, i) => ({ kind: 'line', a: q, b: v[(i + 1) % v.length] }));
     }
+    case 'spline':
+      return splineBeziers(e.pts).map((s) => ({ kind: 'bezier', ...s }));
     default: return [];
   }
 }
 
-const reverseSeg = (s) => ({ ...s, a: s.b, b: s.a });
+const reverseSeg = (s) => (s.kind === 'bezier' ? { ...s, a: s.b, b: s.a, c1: s.c2, c2: s.c1 } : { ...s, a: s.b, b: s.a });
 
 // Chains sketch entities into closed loops. Each loop has exact segments (or a circle)
 // plus a sampled polyline used for nesting tests.
@@ -183,7 +213,7 @@ export function extractLoops(entities) {
   const open = [];
   const pieces = [];
   for (const e of entities) {
-    if (e.type === 'centerline' || e.construction) continue;
+    if (e.type === 'centerline' || e.type === 'point' || e.construction) continue;
     if (e.type === 'circle') {
       if (e.r > 1e-9) loops.push({ circle: { c: [...e.c], r: e.r }, pts: entityPoints(e).slice(0, -1) });
     } else if (e.type === 'rect' || e.type === 'polygon') {
@@ -215,7 +245,7 @@ export function extractLoops(entities) {
       segs.push(s);
       pts.push(...(rev ? [...next.pts].reverse() : next.pts).slice(1));
     }
-    if (closed && segs.length >= 2) {
+    if (closed && (segs.length >= 2 || segs[0].kind !== 'line')) {
       segs[segs.length - 1].b = [...segs[0].a];
       loops.push({ segs, pts: dedupe(pts) });
     } else {
@@ -223,6 +253,38 @@ export function extractLoops(entities) {
     }
   }
   return { loops: loops.filter((l) => l.circle || l.pts.length >= 2), open };
+}
+
+// The single open chain of a sketch (lines, arcs, splines joined end to end), used as a sweep path.
+// Chains extend from the first entity in both directions.
+export function extractPath(entities) {
+  const pieces = [];
+  for (const e of entities) {
+    if (e.type === 'point' || e.type === 'centerline' || e.construction) continue;
+    if (e.type === 'circle' || e.type === 'rect' || e.type === 'polygon') throw new Error('A sweep path must be an open chain of lines, arcs or splines');
+    for (const s of entitySegments(e)) if (d2(s.a, s.b) > 1e-9) pieces.push({ seg: s, used: false });
+  }
+  if (!pieces.length) throw new Error('The path sketch is empty');
+  pieces[0].used = true;
+  const segs = [{ ...pieces[0].seg }];
+  const grow = (atEnd) => {
+    for (;;) {
+      const tip = atEnd ? segs[segs.length - 1].b : segs[0].a;
+      let found = null;
+      for (const q of pieces) {
+        if (q.used) continue;
+        if (d2(atEnd ? q.seg.a : q.seg.b, tip) < TOL) { found = { ...q.seg }; }
+        else if (d2(atEnd ? q.seg.b : q.seg.a, tip) < TOL) { found = reverseSeg(q.seg); }
+        if (found) { q.used = true; break; }
+      }
+      if (!found) return;
+      if (atEnd) { found.a = [...tip]; segs.push(found); } else { found.b = [...tip]; segs.unshift(found); }
+    }
+  };
+  grow(true);
+  grow(false);
+  if (pieces.some((p) => !p.used)) throw new Error('The path must be one connected chain');
+  return segs;
 }
 
 function dedupe(pts) {
