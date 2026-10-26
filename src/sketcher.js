@@ -19,6 +19,11 @@ export const SKETCH_TOOLS = {
   circle: { label: 'Circle', icon: 'circle', key: 'c', hint: 'Click the center, then a point on the circle.' },
   arc: { label: '3 Point Arc', icon: 'arc', key: 'a', hint: 'Click the start point, the end point, then a point on the arc.' },
   polygon: { label: 'Polygon', icon: 'polygon', key: 'p', hint: 'Click the center, then a vertex.' },
+  slot: { label: 'Straight Slot', icon: 'slot', hint: 'Click the first center, the second center, then a point to set the width.' },
+  spline: { label: 'Spline', icon: 'spline', key: 's', hint: 'Click points the curve passes through. Double-click, right-click or Esc to finish.' },
+  point: { label: 'Point', icon: 'point', hint: 'Click to place points (used by the Hole Wizard and as references).' },
+  sfillet: { label: 'Sketch Fillet', icon: 'sketchFillet', hint: 'Click the corner where two lines meet. Set the radius in the PropertyManager.' },
+  trim: { label: 'Trim', icon: 'trim', key: 't', hint: 'Click the part of a line, arc or circle to remove (up to the nearest intersections).' },
 };
 
 const dist = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
@@ -87,6 +92,10 @@ export function entityHandles(e) {
         { p: e.c, type: 'center', handle: 'c', key: 'c' },
         ...polygonVertices(e).map((p, i) => ({ p, type: 'endpoint', handle: i === 0 ? 'v0' : null, key: `v${i}` })),
       ];
+    case 'point':
+      return [{ p: e.p, type: 'endpoint', handle: 'p', key: 'p' }];
+    case 'spline':
+      return e.pts.map((p, i) => ({ p, type: i === 0 || i === e.pts.length - 1 ? 'endpoint' : 'control', handle: `s${i}`, key: `s${i}` }));
     default:
       return [];
   }
@@ -113,8 +122,96 @@ export function setHandle(e, handle, p) {
       if (handle === 'c') e.c = P;
       else { e.r = Math.max(1e-3, dist(e.c, P)); e.rot = Math.atan2(P[1] - e.c[1], P[0] - e.c[0]); }
       break;
+    case 'point': e.p = P; break;
+    case 'spline': e.pts[Number(handle.slice(1))] = P; break;
     default: break;
   }
+}
+
+const sub2 = (a, b) => [a[0] - b[0], a[1] - b[1]];
+const norm2 = (v) => { const l = Math.hypot(v[0], v[1]) || 1; return [v[0] / l, v[1] / l]; };
+const perp2 = (v) => [-v[1], v[0]];
+
+// Geometry of a straight slot between centers c1 and c2; p sets the half-width.
+export function slotEntities(c1, c2, p) {
+  if (dist(c1, c2) < 1e-6) return null;
+  const d = norm2(sub2(c2, c1)), n = perp2(d);
+  const r = Math.abs((p[0] - c1[0]) * n[0] + (p[1] - c1[1]) * n[1]);
+  if (r < 1e-6) return null;
+  const at = (c, v, s) => [c[0] + v[0] * s, c[1] + v[1] * s];
+  return {
+    lines: [
+      { type: 'line', a: at(c1, n, r), b: at(c2, n, r) },
+      { type: 'line', a: at(c2, n, -r), b: at(c1, n, -r) },
+    ],
+    arcs: [arcFrom3(at(c1, n, -r), at(c1, n, r), at(c1, d, -r)), arcFrom3(at(c2, n, r), at(c2, n, -r), at(c2, d, r))],
+  };
+}
+
+// ---------------------------------------------------------------- intersections (for trim)
+
+// Points where entity `e` crosses the (infinite) curves of `o`, limited to o's extent.
+function intersectEntities(e, o) {
+  const segsOf = (x) => {
+    if (x.type === 'line' || x.type === 'centerline') return [{ kind: 'line', a: x.a, b: x.b }];
+    if (x.type === 'circle') return [{ kind: 'circle', c: x.c, r: x.r }];
+    if (x.type === 'arc') return [{ kind: 'arc', c: x.c, r: x.r, a0: x.a0, sweep: arcSweepOf(x) }];
+    if (x.type === 'rect') { const p = entityPoints(x); return p.slice(0, 4).map((q, i) => ({ kind: 'line', a: q, b: p[i + 1] })); }
+    if (x.type === 'polygon') { const v = polygonVertices(x); return v.map((q, i) => ({ kind: 'line', a: q, b: v[(i + 1) % v.length] })); }
+    if (x.type === 'spline') { const p = entityPoints(x); return p.slice(0, -1).map((q, i) => ({ kind: 'line', a: q, b: p[i + 1] })); }
+    return [];
+  };
+  const onSeg = (s, p) => {
+    if (s.kind === 'line') {
+      const t = ((p[0] - s.a[0]) * (s.b[0] - s.a[0]) + (p[1] - s.a[1]) * (s.b[1] - s.a[1])) / (dist(s.a, s.b) ** 2 || 1);
+      return t >= -1e-9 && t <= 1 + 1e-9;
+    }
+    if (s.kind === 'arc') return modAngle(Math.atan2(p[1] - s.c[1], p[0] - s.c[0]) - s.a0) <= s.sweep + 1e-9;
+    return true;
+  };
+  const out = [];
+  for (const A of segsOf(e)) for (const B of segsOf(o)) {
+    for (const p of rawIntersect(A, B)) if (onSeg(A, p) && onSeg(B, p)) out.push(p);
+  }
+  return out;
+}
+
+function arcSweepOf(e) {
+  let s = e.a1 - e.a0;
+  while (s <= 1e-9) s += TWO_PI;
+  while (s > TWO_PI + 1e-9) s -= TWO_PI;
+  return s;
+}
+
+function rawIntersect(A, B) {
+  const lineLine = (a, b, c, d) => {
+    const r = [b[0] - a[0], b[1] - a[1]], s = [d[0] - c[0], d[1] - c[1]];
+    const den = r[0] * s[1] - r[1] * s[0];
+    if (Math.abs(den) < 1e-12) return [];
+    const t = ((c[0] - a[0]) * s[1] - (c[1] - a[1]) * s[0]) / den;
+    return [[a[0] + r[0] * t, a[1] + r[1] * t]];
+  };
+  const lineCircle = (a, b, c, r) => {
+    const d = [b[0] - a[0], b[1] - a[1]], f = [a[0] - c[0], a[1] - c[1]];
+    const A2 = d[0] * d[0] + d[1] * d[1], B2 = 2 * (f[0] * d[0] + f[1] * d[1]), C2 = f[0] * f[0] + f[1] * f[1] - r * r;
+    const disc = B2 * B2 - 4 * A2 * C2;
+    if (disc < 0 || !A2) return [];
+    const sq = Math.sqrt(disc);
+    return [(-B2 - sq) / (2 * A2), (-B2 + sq) / (2 * A2)].map((t) => [a[0] + d[0] * t, a[1] + d[1] * t]);
+  };
+  const circleCircle = (c1, r1, c2, r2) => {
+    const D = dist(c1, c2);
+    if (D < 1e-12 || D > r1 + r2 + 1e-12 || D < Math.abs(r1 - r2) - 1e-12) return [];
+    const a = (r1 * r1 - r2 * r2 + D * D) / (2 * D);
+    const hh = Math.sqrt(Math.max(0, r1 * r1 - a * a));
+    const m = [c1[0] + (a * (c2[0] - c1[0])) / D, c1[1] + (a * (c2[1] - c1[1])) / D];
+    return [[m[0] + (hh * (c2[1] - c1[1])) / D, m[1] - (hh * (c2[0] - c1[0])) / D], [m[0] - (hh * (c2[1] - c1[1])) / D, m[1] + (hh * (c2[0] - c1[0])) / D]];
+  };
+  const round = (s) => s.kind !== 'line';
+  if (!round(A) && !round(B)) return lineLine(A.a, A.b, B.a, B.b);
+  if (!round(A)) return lineCircle(A.a, A.b, B.c, B.r);
+  if (!round(B)) return lineCircle(B.a, B.b, A.c, A.r);
+  return circleCircle(A.c, A.r, B.c, B.r);
 }
 
 function maxParamChange(a, b) {
@@ -598,6 +695,8 @@ export class Sketcher {
     if (this.valueEditor) this.commitValueEditor();
     const raw = this.localPoint(ev.clientX, ev.clientY);
     if (this.tool === 'dimension') { this.dimensionClick(raw); return; }
+    if (this.tool === 'trim') { this.trimAt(raw); return; }
+    if (this.tool === 'sfillet') { this.filletAt(raw); return; }
     if (this.tool === 'select') {
       const h = this.hitHandle(raw);
       if (h) {
@@ -709,9 +808,288 @@ export class Sketcher {
         this.previewGroup.clear();
         break;
       }
+      case 'point':
+        this.addEntity({ type: 'point', p }, s.ref ? [coincident(s.ref, 'p')] : []);
+        break;
+      case 'spline':
+        if (pts.length && dist(pts[pts.length - 1].p, p) < 1e-6) break;
+        this.pts = [...pts, { p, ref: s.ref }];
+        break;
+      case 'slot': {
+        if (pts.length < 2) { if (!pts.length || dist(pts[0].p, p) > 1e-6) this.pts = [...pts, { p, ref: s.ref }]; break; }
+        const slot = slotEntities(pts[0].p, pts[1].p, p);
+        if (slot) this.addSlot(slot, pts[0].ref, pts[1].ref);
+        this.pts = [];
+        this.previewGroup.clear();
+        break;
+      }
       default: break;
     }
     this.redraw();
+  }
+
+  // Straight slot: two lines + two arcs held by coincident, tangent and equal relations.
+  addSlot({ lines, arcs }, ref1, ref2) {
+    this.pushUndo();
+    const b = this.entities.length;
+    this.entities.push(...lines, ...arcs);
+    const C = this.constraints;
+    const L1 = b, L2 = b + 1, A1 = b + 2, A2 = b + 3;
+    const keyAt = (ai, q) => (dist(arcEnds(this.entities[ai])[0], q) < 1e-6 ? 'p0' : 'p1');
+    C.push(
+      { type: 'coincident', p1: { e: L1, p: 'b' }, p2: { e: A2, p: keyAt(A2, lines[0].b) } },
+      { type: 'coincident', p1: { e: L2, p: 'a' }, p2: { e: A2, p: keyAt(A2, lines[1].a) } },
+      { type: 'coincident', p1: { e: L2, p: 'b' }, p2: { e: A1, p: keyAt(A1, lines[1].b) } },
+      { type: 'coincident', p1: { e: L1, p: 'a' }, p2: { e: A1, p: keyAt(A1, lines[0].a) } },
+      { type: 'tangent', e1: L1, e2: A1 }, { type: 'tangent', e1: L1, e2: A2 },
+      { type: 'tangent', e1: L2, e2: A1 }, { type: 'tangent', e1: L2, e2: A2 },
+      { type: 'equal', e1: A1, e2: A2 },
+    );
+    if (ref1) C.push({ type: 'coincident', p1: { e: A1, p: 'c' }, p2: ref1 });
+    if (ref2) C.push({ type: 'coincident', p1: { e: A2, p: 'c' }, p2: ref2 });
+    this.resolve();
+    this.changed();
+  }
+
+  finishSpline() {
+    if (this.tool !== 'spline' || this.pts.length < 2) return false;
+    const pts = this.pts;
+    const rel = [];
+    if (pts[0].ref) rel.push((i) => ({ type: 'coincident', p1: { e: i, p: 's0' }, p2: pts[0].ref }));
+    if (pts[pts.length - 1].ref) rel.push((i) => ({ type: 'coincident', p1: { e: i, p: `s${pts.length - 1}` }, p2: pts[pts.length - 1].ref }));
+    this.addEntity({ type: 'spline', pts: pts.map((q) => [...q.p]) }, rel);
+    this.pts = [];
+    this.previewGroup.clear();
+    return true;
+  }
+
+  // -------------------------------------------------------- trim / fillet / offset / mirror
+
+  trimAt(raw) {
+    const idx = this.hitEntity(raw);
+    const e = this.entities[idx];
+    if (!e || !['line', 'centerline', 'arc', 'circle'].includes(e.type)) {
+      if (e) this.app.toast('Trim works on lines, arcs and circles');
+      return;
+    }
+    const cuts = [];
+    this.entities.forEach((o, j) => { if (j !== idx && o.type !== 'point') for (const p of intersectEntities(e, o)) cuts.push({ p, j }); });
+    const param = (q) => {
+      if (e.type === 'line' || e.type === 'centerline') {
+        const d = [e.b[0] - e.a[0], e.b[1] - e.a[1]];
+        return ((q[0] - e.a[0]) * d[0] + (q[1] - e.a[1]) * d[1]) / (d[0] * d[0] + d[1] * d[1]);
+      }
+      const ang = modAngle(Math.atan2(q[1] - e.c[1], q[0] - e.c[0]) - (e.type === 'arc' ? e.a0 : 0));
+      return e.type === 'arc' ? ang / arcSweepOf(e) : ang / TWO_PI;
+    };
+    const tc = param(raw);
+    // circles have no ends, so a cut at parameter 0 counts; lines/arcs ignore cuts at their own ends
+    const ts = cuts.map((c) => ({ ...c, t: param(c.p) }))
+      .filter((c) => (e.type === 'circle' ? c.t < 1 - 1e-9 : c.t > 1e-6 && c.t < 1 - 1e-6))
+      .sort((a, b) => a.t - b.t);
+    this.pushUndo();
+    const affected = new Set([idx]);
+    // drop relations/dimensions that involve the trimmed entity: its ends change
+    const keep = this.constraints.filter((c) => !constraintEntities(c).includes(idx));
+    const onCut = (newIdx, key, cut) => {
+      if (!cut) return;
+      const o = this.entities[cut.j];
+      if (o.type === 'line' || o.type === 'centerline') keep.push({ type: 'onLine', p: { e: newIdx, p: key }, e: cut.j });
+      else if (o.type === 'circle' || o.type === 'arc') keep.push({ type: 'onCircle', p: { e: newIdx, p: key }, e: cut.j });
+    };
+    if (e.type === 'circle') {
+      if (ts.length < 2) { this.undoStack.pop(); this.app.toast('A circle needs two intersections to trim'); return; }
+      let hi = ts.find((c) => c.t > tc) || ts[0];
+      let lo = [...ts].reverse().find((c) => c.t < tc) || ts[ts.length - 1];
+      const angOf = (q) => Math.atan2(q[1] - e.c[1], q[0] - e.c[0]);
+      this.entities[idx] = { type: 'arc', c: [...e.c], r: e.r, a0: angOf(hi.p), a1: angOf(lo.p), construction: e.construction };
+      this.feature.constraints = keep;
+      onCut(idx, 'p0', hi); onCut(idx, 'p1', lo);
+    } else {
+      const lo = [...ts].reverse().find((c) => c.t < tc) || null;
+      const hi = ts.find((c) => c.t > tc) || null;
+      if (!lo && !hi) {
+        this.feature.constraints = remapAfterDelete(this.constraints, new Set([idx]));
+        this.feature.entities = this.entities.filter((_, i) => i !== idx);
+        this.clearSelection();
+        this.changed();
+        return;
+      }
+      const isLine = e.type !== 'arc';
+      const at = (c) => c.p;
+      if (isLine) {
+        if (lo && hi) {
+          const tail = { ...e, a: [...at(hi)], b: [...e.b] };
+          this.entities[idx] = { ...e, b: [...at(lo)] };
+          this.entities.push(tail);
+          this.feature.constraints = keep;
+          onCut(idx, 'b', lo); onCut(this.entities.length - 1, 'a', hi);
+          affected.add(this.entities.length - 1);
+        } else if (lo) { this.entities[idx] = { ...e, b: [...at(lo)] }; this.feature.constraints = keep; onCut(idx, 'b', lo); }
+        else { this.entities[idx] = { ...e, a: [...at(hi)] }; this.feature.constraints = keep; onCut(idx, 'a', hi); }
+      } else {
+        const angOf = (q) => Math.atan2(q[1] - e.c[1], q[0] - e.c[0]);
+        if (lo && hi) {
+          const tail = { ...e, a0: angOf(hi.p), a1: e.a1 };
+          this.entities[idx] = { ...e, a1: angOf(lo.p) };
+          this.entities.push(tail);
+          this.feature.constraints = keep;
+          onCut(idx, 'p1', lo); onCut(this.entities.length - 1, 'p0', hi);
+        } else if (lo) { this.entities[idx] = { ...e, a1: angOf(lo.p) }; this.feature.constraints = keep; onCut(idx, 'p1', lo); }
+        else { this.entities[idx] = { ...e, a0: angOf(hi.p) }; this.feature.constraints = keep; onCut(idx, 'p0', hi); }
+      }
+    }
+    this.clearSelection();
+    this.resolve();
+    this.changed();
+  }
+
+  // Replaces the corner between two lines with a tangent arc of radius r.
+  filletAt(raw) {
+    const r = this.app.settings.sketchFilletRadius || 2;
+    const h = this.hitHandle(raw, { keyed: true });
+    if (!h || h.idx < 0) { this.app.toast('Click the corner point where two lines meet'); return; }
+    const P = h.p;
+    const lines = [];
+    this.entities.forEach((e, i) => {
+      if (e.type !== 'line') return;
+      if (dist(e.a, P) < 1e-6) lines.push({ i, key: 'a', far: e.b });
+      else if (dist(e.b, P) < 1e-6) lines.push({ i, key: 'b', far: e.a });
+    });
+    if (lines.length !== 2) { this.app.toast('The corner must join exactly two lines'); return; }
+    const [L1, L2] = lines;
+    const u1 = norm2(sub2(L1.far, P)), u2 = norm2(sub2(L2.far, P));
+    const theta = Math.acos(Math.max(-1, Math.min(1, u1[0] * u2[0] + u1[1] * u2[1])));
+    if (theta < 1e-3 || Math.PI - theta < 1e-3) { this.app.toast('The lines are parallel'); return; }
+    const t = r / Math.tan(theta / 2);
+    if (t >= dist(P, L1.far) || t >= dist(P, L2.far)) { this.app.toast('Fillet radius is too large for these lines', 'error'); return; }
+    const T1 = [P[0] + u1[0] * t, P[1] + u1[1] * t], T2 = [P[0] + u2[0] * t, P[1] + u2[1] * t];
+    const bis = norm2([u1[0] + u2[0], u1[1] + u2[1]]);
+    const C = [P[0] + bis[0] * (r / Math.sin(theta / 2)), P[1] + bis[1] * (r / Math.sin(theta / 2))];
+    const toP = norm2(sub2(P, C));
+    const arc = arcFrom3(T1, T2, [C[0] + toP[0] * r, C[1] + toP[1] * r]);
+    this.pushUndo();
+    // remove the corner coincidence, then connect both lines to the new arc
+    this.feature.constraints = this.constraints.filter((c) => !(c.type === 'coincident' && [c.p1, c.p2].every((q) => q && ((q.e === L1.i && q.p === L1.key) || (q.e === L2.i && q.p === L2.key)))));
+    this.entities[L1.i][L1.key] = T1;
+    this.entities[L2.i][L2.key] = T2;
+    const ai = this.entities.length;
+    this.entities.push(arc);
+    const k1 = dist(arcEnds(arc)[0], T1) < 1e-6 ? 'p0' : 'p1';
+    this.constraints.push(
+      { type: 'coincident', p1: { e: L1.i, p: L1.key }, p2: { e: ai, p: k1 } },
+      { type: 'coincident', p1: { e: L2.i, p: L2.key }, p2: { e: ai, p: k1 === 'p0' ? 'p1' : 'p0' } },
+      { type: 'tangent', e1: L1.i, e2: ai }, { type: 'tangent', e1: L2.i, e2: ai },
+      { type: 'radius', e: ai, value: r, pos: [C[0] + toP[0] * r * 1.8, C[1] + toP[1] * r * 1.8] },
+    );
+    this.resolve();
+    this.changed();
+  }
+
+  // Offsets the selected entities by `d` (to the left of each chain; `reverse` flips the side).
+  offsetSelected(d, reverse = false) {
+    const sel = [...this.selected].map((i) => this.entities[i]).filter((e) => ['line', 'arc', 'circle'].includes(e.type));
+    if (!sel.length) { this.app.toast('Select lines, arcs or circles to offset'); return; }
+    const s = reverse ? -1 : 1;
+    // orient connected entities head-to-tail so "left" is consistent along chains
+    const segs = sel.map((e) => (e.type === 'line' ? { e, a: e.a, b: e.b } : e.type === 'arc' ? { e, a: arcEnds(e)[0], b: arcEnds(e)[1] } : { e }));
+    const ordered = [];
+    const pool = segs.filter((x) => x.e.type !== 'circle');
+    while (pool.length) {
+      const chain = [pool.shift()];
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (let k = 0; k < pool.length; k++) {
+          const q = pool[k], end = chain[chain.length - 1].b, start = chain[0].a;
+          if (dist(q.a, end) < 1e-6) { chain.push(q); pool.splice(k, 1); grew = true; break; }
+          if (dist(q.b, end) < 1e-6) { chain.push({ ...q, a: q.b, b: q.a, rev: !q.rev }); pool.splice(k, 1); grew = true; break; }
+          if (dist(q.b, start) < 1e-6) { chain.unshift(q); pool.splice(k, 1); grew = true; break; }
+          if (dist(q.a, start) < 1e-6) { chain.unshift({ ...q, a: q.b, b: q.a, rev: !q.rev }); pool.splice(k, 1); grew = true; break; }
+        }
+      }
+      ordered.push(chain);
+    }
+    const out = [];
+    for (const chain of ordered) {
+      const made = chain.map((q) => {
+        if (q.e.type === 'line') {
+          const n = perp2(norm2(sub2(q.b, q.a)));
+          return { type: 'line', a: [q.a[0] + n[0] * d * s, q.a[1] + n[1] * d * s], b: [q.b[0] + n[0] * d * s, q.b[1] + n[1] * d * s] };
+        }
+        // arc traversed CCW (not reversed): left is toward the center
+        const ccw = !q.rev;
+        const r = q.e.r + (ccw ? -d : d) * s;
+        if (r <= 1e-6) return null;
+        return { type: 'arc', c: [...q.e.c], r, a0: q.e.a0, a1: q.e.a1 };
+      });
+      // join consecutive offset lines at their intersection (sharp corners)
+      for (let k = 0; k + 1 < made.length; k++) {
+        const A = made[k], B = made[k + 1];
+        if (A?.type === 'line' && B?.type === 'line') {
+          const p = rawIntersect({ kind: 'line', a: A.a, b: A.b }, { kind: 'line', a: B.a, b: B.b })[0];
+          if (p) { A.b = p; B.a = [...p]; }
+        }
+      }
+      if (made.length > 2 && dist(chain[0].a, chain[chain.length - 1].b) < 1e-6) {
+        const A = made[made.length - 1], B = made[0];
+        if (A?.type === 'line' && B?.type === 'line') {
+          const p = rawIntersect({ kind: 'line', a: A.a, b: A.b }, { kind: 'line', a: B.a, b: B.b })[0];
+          if (p) { A.b = p; B.a = [...p]; }
+        }
+      }
+      out.push(...made.filter(Boolean));
+    }
+    for (const c of segs.filter((x) => x.e.type === 'circle')) {
+      const r = c.e.r + d * s;
+      if (r > 1e-6) out.push({ type: 'circle', c: [...c.e.c], r });
+    }
+    this.pushUndo();
+    this.entities.push(...out);
+    this.clearSelection();
+    this.changed();
+    this.app.toast(`Offset ${out.length} entit${out.length === 1 ? 'y' : 'ies'}`);
+  }
+
+  // Mirrors the selected entities about the selected (or only) centerline.
+  mirrorSelected() {
+    const sel = [...this.selected];
+    let axisIdx = sel.find((i) => this.entities[i].type === 'centerline');
+    if (axisIdx == null) {
+      const cls = this.entities.map((e, i) => (e.type === 'centerline' ? i : -1)).filter((i) => i >= 0);
+      if (cls.length === 1) axisIdx = cls[0];
+    }
+    if (axisIdx == null) { this.app.toast('Select the entities and a centerline to mirror about'); return; }
+    const ax = this.entities[axisIdx];
+    const d = norm2(sub2(ax.b, ax.a));
+    const m = (p) => {
+      const v = sub2(p, ax.a), t = v[0] * d[0] + v[1] * d[1];
+      const f = [ax.a[0] + d[0] * t, ax.a[1] + d[1] * t];
+      return [2 * f[0] - p[0], 2 * f[1] - p[1]];
+    };
+    const mAng = (a) => 2 * Math.atan2(d[1], d[0]) - a;
+    const out = [];
+    for (const i of sel) {
+      if (i === axisIdx) continue;
+      const e = this.entities[i];
+      const c = clone(e);
+      switch (e.type) {
+        case 'line': case 'centerline': c.a = m(e.a); c.b = m(e.b); break;
+        case 'circle': c.c = m(e.c); break;
+        case 'arc': c.c = m(e.c); c.a0 = mAng(e.a1); c.a1 = mAng(e.a0); break;
+        case 'point': c.p = m(e.p); break;
+        case 'spline': c.pts = e.pts.map(m); break;
+        case 'polygon': c.c = m(e.c); c.rot = mAng(e.rot); break;
+        case 'rect': { const p1 = m(e.a), p2 = m(e.b); c.a = [Math.min(p1[0], p2[0]), Math.min(p1[1], p2[1])]; c.b = [Math.max(p1[0], p2[0]), Math.max(p1[1], p2[1])]; break; }
+        default: continue;
+      }
+      out.push(c);
+    }
+    if (!out.length) { this.app.toast('Select entities to mirror'); return; }
+    this.pushUndo();
+    this.entities.push(...out);
+    this.clearSelection();
+    this.changed();
   }
 
   makeEntity(tool, a, p) {
@@ -747,7 +1125,7 @@ export class Sketcher {
     }
 
     const prev = this.pts[this.pts.length - 1] || null;
-    const s = this.tool === 'select' || this.tool === 'dimension' ? { p: raw, type: null } : this.snap(raw, { from: this.tool === 'line' || this.tool === 'centerline' ? prev?.p : null });
+    const s = ['select', 'dimension', 'trim', 'sfillet'].includes(this.tool) ? { p: raw, type: null } : this.snap(raw, { from: this.tool === 'line' || this.tool === 'centerline' ? prev?.p : null });
     const p = s.p;
     this.app.setCoords(p);
 
@@ -756,7 +1134,7 @@ export class Sketcher {
     this.marker.geometry.dispose();
     this.marker.geometry = mg;
 
-    if (this.tool === 'select' || this.tool === 'dimension') {
+    if (['select', 'dimension', 'trim', 'sfillet'].includes(this.tool)) {
       const handle = this.hitHandle(raw, { keyed: this.tool === 'dimension', withOrigin: this.tool === 'dimension', skipMid: this.tool === 'dimension' });
       const idx = handle ? -1 : this.hitEntity(raw);
       if (idx !== this.hoverIdx) { this.hoverIdx = idx; this.redraw(); }
@@ -824,6 +1202,17 @@ export class Sketcher {
         case 'polygon':
           ents = [this.makeEntity(this.tool, a, p)];
           label = `R: ${units.fmt(dist(a, p))}`;
+          break;
+        case 'spline':
+          ents = [{ type: 'spline', pts: [...pts, p] }];
+          label = `${pts.length + 1} points — double-click to finish`;
+          break;
+        case 'slot':
+          if (pts.length === 1) { ents = [{ type: 'centerline', a, b: p }]; label = `L: ${units.fmt(dist(a, p))}`; }
+          else {
+            const sl = slotEntities(pts[0], pts[1], p);
+            if (sl) { ents = [...sl.lines, ...sl.arcs]; label = `W: ${units.fmt(sl.arcs[0].r * 2)}`; }
+          }
           break;
         case 'arc':
           if (pts.length === 1) { ents = [{ type: 'line', a, b: p }]; label = `L: ${units.fmt(dist(a, p))}`; }
@@ -1060,6 +1449,7 @@ export class Sketcher {
   // -------------------------------------------------------- misc events
 
   finishChain() {
+    if (this.finishSpline()) return true;
     if (this.pts.length || this.dimPicks.length) {
       this.pts = [];
       this.dimPicks = [];
@@ -1071,7 +1461,7 @@ export class Sketcher {
     return false;
   }
 
-  dblclick() { if (this.tool === 'line') this.finishChain(); }
+  dblclick() { if (this.tool === 'line' || this.tool === 'spline') this.finishChain(); }
 
   contextMenu() { return this.finishChain(); }
 

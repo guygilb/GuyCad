@@ -12,10 +12,16 @@ const LAYOUT = {
   circle: ['c0', 'c1', 'r'],
   arc: ['c0', 'c1', 'r', 'a0ang', 'a1ang'],
   polygon: ['c0', 'c1', 'r', 'rot'],
+  point: ['p0', 'p1'],
 };
 
+// Splines have one x/y pair per through-point.
+const layoutOf = (e) => (e.type === 'spline' ? e.pts.flatMap((_, i) => [`s${i}x`, `s${i}y`]) : LAYOUT[e.type] || []);
+
 function readParam(e, k) {
+  if (k[0] === 's' && e.type === 'spline') return e.pts[Number(k.slice(1, -1))][k.endsWith('x') ? 0 : 1];
   switch (k) {
+    case 'p0': return e.p[0]; case 'p1': return e.p[1];
     case 'a0': return e.a[0]; case 'a1': return e.a[1];
     case 'b0': return e.b[0]; case 'b1': return e.b[1];
     case 'c0': return e.c[0]; case 'c1': return e.c[1];
@@ -26,7 +32,9 @@ function readParam(e, k) {
 }
 
 function writeParam(e, k, v) {
+  if (k[0] === 's' && e.type === 'spline') { e.pts[Number(k.slice(1, -1))][k.endsWith('x') ? 0 : 1] = v; return; }
   switch (k) {
+    case 'p0': e.p[0] = v; break; case 'p1': e.p[1] = v; break;
     case 'a0': e.a[0] = v; break; case 'a1': e.a[1] = v; break;
     case 'b0': e.b[0] = v; break; case 'b1': e.b[1] = v; break;
     case 'c0': e.c[0] = v; break; case 'c1': e.c[1] = v; break;
@@ -41,14 +49,14 @@ export function buildVars(entities) {
   const x = [];
   entities.forEach((e) => {
     offsets.push(x.length);
-    for (const k of LAYOUT[e.type] || []) x.push(readParam(e, k));
+    for (const k of layoutOf(e)) x.push(readParam(e, k));
   });
   return { x, offsets };
 }
 
 export function writeVars(entities, x, offsets) {
   entities.forEach((e, i) => {
-    (LAYOUT[e.type] || []).forEach((k, j) => writeParam(e, k, x[offsets[i] + j]));
+    layoutOf(e).forEach((k, j) => writeParam(e, k, x[offsets[i] + j]));
   });
 }
 
@@ -75,6 +83,12 @@ function view(entities, x, offsets) {
           if (ref.p === 'ba') return [P(i, 2), P(i, 1)];
           return [(P(i, 0) + P(i, 2)) / 2, (P(i, 1) + P(i, 3)) / 2];
         case 'circle': return [P(i, 0), P(i, 1)];
+        case 'point': return [P(i, 0), P(i, 1)];
+        case 'spline': {
+          const last = e.pts.length - 1;
+          const k = ref.p === 'a' ? 0 : ref.p === 'b' ? last : Number(String(ref.p).slice(1)) || 0;
+          return [P(i, 2 * k), P(i, 2 * k + 1)];
+        }
         case 'arc': {
           if (ref.p === 'c') return [P(i, 0), P(i, 1)];
           const ang = ref.p === 'p0' ? P(i, 3) : P(i, 4);
@@ -348,7 +362,7 @@ export function analyze(entities, constraints) {
   pivots.forEach((pc, ri) => { for (const fc of free) if (Math.abs(R[ri][fc]) > 1e-7) undetermined.add(pc); });
   const defined = new Set();
   entities.forEach((e, i) => {
-    const k = (LAYOUT[e.type] || []).length;
+    const k = layoutOf(e).length;
     let ok = true;
     for (let j = 0; j < k; j++) if (undetermined.has(offsets[i] + j)) ok = false;
     if (ok) defined.add(i);
