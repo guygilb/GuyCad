@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: blob:; worker-src 'self' blob:" />
+  <title>GuyCAD</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 L29 9 L29 23 L16 30 L3 23 L3 9 Z' fill='%23e8590c'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <div id="app">
+    <header id="titlebar">
+      <div class="brand"><span class="brand-logo"></span><span class="brand-name">Guy<b>CAD</b></span></div>
+      <nav id="menubar"></nav>
+      <div id="quickaccess"></div>
+      <div id="doc-title"></div>
+      <div class="titlebar-right">
+        <span id="user-badge"></span>
+      </div>
+    </header>
+
+    <div id="commandmanager">
+      <div id="cm-buttons"></div>
+      <div id="cm-tabs"></div>
+    </div>
+
+    <div id="doc-tabs"></div>
+
+    <main id="workspace">
+      <aside id="leftpanel">
+        <div id="lp-tabs"></div>
+        <div id="lp-body">
+          <div id="tree" class="lp-page"></div>
+          <div id="pm" class="lp-page"></div>
+        </div>
+      </aside>
+      <div id="splitter"></div>
+      <section id="viewport">
+        <div id="hud"></div>
+        <div id="banner" hidden></div>
+        <div id="confirm-corner" hidden></div>
+        <div id="cursor-label" hidden></div>
+        <div id="vp-overlay"></div>
+      </section>
+      <aside id="taskpane">
+        <div id="tp-strip"></div>
+        <div id="tp-flyout" hidden></div>
+      </aside>
+    </main>
+
+    <footer id="statusbar">
+      <span id="sb-message"></span>
+      <span id="sb-busy" hidden></span>
+      <span class="sb-spacer"></span>
+      <span id="sb-coords"></span>
+      <span id="sb-editing"></span>
+      <button id="sb-units"></button>
+    </footer>
+  </div>
+  <div id="menus-layer"></div>
+  <div id="modal-layer"></div>
+  <div id="toast-layer"></div>
+  <input type="file" id="file-input" accept=".gcad,.json" hidden />
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
