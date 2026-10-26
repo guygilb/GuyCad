@@ -30,3 +30,4 @@ export default async function (t) {
   ok(await t.eval('guycad.sketcher.analysis.status') !== 'over', 'relations consistent');
   await t.shot('sketch-tools');
 }
+

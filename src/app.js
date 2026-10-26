@@ -468,7 +468,7 @@ export class App {
           { label: 'Features', icon: 'fillet', items: ['hole', 'fillet', 'chamfer', 'shell', 'draft'] },
           { label: 'Pattern/Mirror', icon: 'linpattern', items: ['linpattern', 'cirpattern', 'mirror'] },
           { label: 'Reference Geometry', icon: 'plane', items: ['plane'] }, '|', 'sketch']),
-      Tools: [{ label: 'Sketch Entities', icon: 'line', items: tools }, { label: 'Sketch Tools', icon: 'trim', items: ['tool:sfillet', 'tool:trim', 'offsetEntities', 'mirrorEntities'] }, 'addRelation', 'construction', '|', 'measure', 'massProps', 'section', 'interference', 'bom', 'stats', '|', 'appearance', 'material', '|', 'options'],
+      Tools: [{ label: 'Sketch Entities', icon: 'line', items: tools }, { label: 'Sketch Tools', icon: 'trim', items: ['tool:sfillet', 'tool:trim', 'tool:convert', 'offsetEntities', 'mirrorEntities'] }, 'addRelation', 'construction', '|', 'measure', 'massProps', 'section', 'interference', 'bom', 'stats', '|', 'appearance', 'material', '|', 'options'],
       Help: ['shortcuts', 'welcome', '|', 'about'],
     };
     const bar = $('#menubar');
@@ -561,7 +561,7 @@ export class App {
     } else {
       this.cmTabs = {
         Features: ['extrude', 'revolve', 'sweep', 'loft', '|', 'extrudeCut', 'revolveCut', 'sweepCut', 'loftCut', '|', 'hole', 'fillet', 'chamfer', 'shell', 'draft', '|', 'linpattern', 'cirpattern', 'mirror', '|', 'plane', '|', 'sketch', 'makeDrawing'],
-        Sketch: ['sketch', '|', 'tool:select', 'tool:dimension', '|', 'tool:line', 'tool:centerline', 'tool:rect', 'tool:crect', 'tool:rect3', 'tool:slot', 'tool:circle', 'tool:ellipse', 'tool:arc', 'tool:carc', 'tool:tarc', 'tool:polygon', 'tool:spline', 'tool:point', '|', 'tool:sfillet', 'tool:trim', 'offsetEntities', 'mirrorEntities', '|', 'addRelation', 'construction', 'sketchDelete', '|', 'toggleGrid', 'toggleSnap'],
+        Sketch: ['sketch', '|', 'tool:select', 'tool:dimension', '|', 'tool:line', 'tool:centerline', 'tool:rect', 'tool:crect', 'tool:rect3', 'tool:slot', 'tool:circle', 'tool:ellipse', 'tool:arc', 'tool:carc', 'tool:tarc', 'tool:polygon', 'tool:spline', 'tool:point', '|', 'tool:sfillet', 'tool:trim', 'tool:convert', 'offsetEntities', 'mirrorEntities', '|', 'addRelation', 'construction', 'sketchDelete', '|', 'toggleGrid', 'toggleSnap'],
         Evaluate: ['measure', 'massProps', 'section', 'stats'],
         View: viewTab,
       };

@@ -28,6 +28,7 @@ export const SKETCH_TOOLS = {
   point: { label: 'Point', icon: 'point', hint: 'Click to place points (used by the Hole Wizard and as references).' },
   sfillet: { label: 'Sketch Fillet', icon: 'sketchFillet', hint: 'Click the corner where two lines meet. Set the radius in the PropertyManager.' },
   trim: { label: 'Trim', icon: 'trim', key: 't', hint: 'Click the part of a line, arc or circle to remove (up to the nearest intersections).' },
+  convert: { label: 'Convert Entities', icon: 'convert', hint: 'Click model edges to copy them into the sketch, or click a flat face to copy all of its edges.' },
 };
 
 const dist = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
@@ -775,6 +776,7 @@ export class Sketcher {
     const raw = this.localPoint(ev.clientX, ev.clientY);
     if (this.tool === 'dimension') { this.dimensionClick(raw); return; }
     if (this.tool === 'trim') { this.trimAt(raw); return; }
+    if (this.tool === 'convert') { this.convertAt(ev); return; }
     if (this.tool === 'sfillet') { this.filletAt(raw); return; }
     if (this.tool === 'select') {
       const h = this.hitHandle(raw);
@@ -1263,6 +1265,62 @@ export class Sketcher {
     return true;
   }
 
+  // Convert Entities: project picked model edges (or all edges of a picked planar face) into the sketch.
+  convertAt(ev) {
+    const hit = this.vp.pick(ev.clientX, ev.clientY, { planes: false, sketches: false });
+    if (!hit || (hit.kind !== 'edge' && hit.kind !== 'face')) { this.app.toast('Click a model edge or face'); return; }
+    const body = this.vp.body(hit.bodyId);
+    const data = body.data;
+    let edges = [];
+    if (hit.kind === 'edge') edges = [hit.edge];
+    else {
+      const f = data.faces[hit.face];
+      if (f.type !== 'PLANE') { this.app.toast('Click a flat face, or pick its edges one by one'); return; }
+      const n = f.normal, c = f.center;
+      const onPlane = (p) => Math.abs((p[0] - c[0]) * n[0] + (p[1] - c[1]) * n[1] + (p[2] - c[2]) * n[2]) < 1e-5;
+      const faceTris = [];
+      const s0 = data.faceRanges[hit.face * 2], cnt = data.faceRanges[hit.face * 2 + 1];
+      for (let t = s0; t < s0 + cnt; t += 3) faceTris.push([0, 1, 2].map((k) => [...data.vertices.slice(data.indices[t + k] * 3, data.indices[t + k] * 3 + 3)]));
+      const tri = new THREE.Triangle(), q = new THREE.Vector3();
+      const nearFace = (p) => {
+        const P = new THREE.Vector3(...p);
+        return faceTris.some((T) => tri.set(new THREE.Vector3(...T[0]), new THREE.Vector3(...T[1]), new THREE.Vector3(...T[2])).closestPointToPoint(P, q).distanceTo(P) < 0.05); // curved edges bulge past the tessellation
+      };
+      data.edges.forEach((e, i) => { if (onPlane(e.a) && onPlane(e.b) && onPlane(e.mid) && nearFace(e.mid)) edges.push(i); });
+    }
+    const toLocal = (p) => {
+      const v = new THREE.Vector3(...p).applyMatrix4(body.group.matrixWorld).applyMatrix4(this.inverse);
+      return [v.x, v.y];
+    };
+    const normal = new THREE.Vector3(...this.frame.normal);
+    const made = [];
+    for (const i of edges) {
+      const e = data.edges[i];
+      if (e.type === 'LINE') { made.push({ type: 'line', a: toLocal(e.a), b: toLocal(e.b) }); continue; }
+      if (e.type === 'CIRCLE' && Math.abs(new THREE.Vector3(...e.axis).transformDirection(body.group.matrixWorld).dot(normal)) > 0.9999) {
+        const c = toLocal(e.center);
+        if (dist(e.a, e.b) < 1e-6) made.push({ type: 'circle', c, r: e.radius });
+        else { const arc = arcFrom3(toLocal(e.a), toLocal(e.b), toLocal(e.mid)); if (arc) made.push(arc); }
+        continue;
+      }
+      // any other curve: a spline through points of its tessellation
+      const start = data.edgeRanges[i * 2], count = data.edgeRanges[i * 2 + 1];
+      const pts = [];
+      for (let k = start; k < start + count; k++) pts.push(toLocal([...data.edgeLines.slice(k * 3, k * 3 + 3)]));
+      const clean = pts.filter((p, k) => !k || dist(p, pts[k - 1]) > 1e-6);
+      const step = Math.max(1, Math.ceil(clean.length / 16));
+      const sampled = clean.filter((_, k) => k % step === 0);
+      if (dist(sampled[sampled.length - 1], clean[clean.length - 1]) > 1e-6) sampled.push(clean[clean.length - 1]);
+      if (sampled.length >= 2) made.push({ type: 'spline', pts: sampled });
+    }
+    if (!made.length) { this.app.toast('Nothing to convert there'); return; }
+    this.pushUndo();
+    this.entities.push(...made);
+    this.feature.constraints.push(...inferCoincidences(this.entities).filter((c) => c.p1.e >= this.entities.length - made.length || c.p2.e >= this.entities.length - made.length));
+    this.changed();
+    this.app.toast(`Converted ${made.length} edge${made.length === 1 ? '' : 's'}`);
+  }
+
   // Mirrors the selected entities about the selected (or only) centerline.
   mirrorSelected() {
     const sel = [...this.selected];
@@ -1337,7 +1395,7 @@ export class Sketcher {
     }
 
     const prev = this.pts[this.pts.length - 1] || null;
-    const s = ['select', 'dimension', 'trim', 'sfillet'].includes(this.tool) ? { p: raw, type: null } : this.snap(raw, { from: this.tool === 'line' || this.tool === 'centerline' ? prev?.p : null });
+    const s = ['select', 'dimension', 'trim', 'sfillet', 'convert'].includes(this.tool) ? { p: raw, type: null } : this.snap(raw, { from: this.tool === 'line' || this.tool === 'centerline' ? prev?.p : null });
     const p = s.p;
     this.app.setCoords(p);
 
@@ -1346,7 +1404,7 @@ export class Sketcher {
     this.marker.geometry.dispose();
     this.marker.geometry = mg;
 
-    if (['select', 'dimension', 'trim', 'sfillet'].includes(this.tool)) {
+    if (['select', 'dimension', 'trim', 'sfillet', 'convert'].includes(this.tool)) {
       const handle = this.hitHandle(raw, { keyed: this.tool === 'dimension', withOrigin: this.tool === 'dimension', skipMid: this.tool === 'dimension' });
       const idx = handle ? -1 : this.hitEntity(raw);
       if (idx !== this.hoverIdx) { this.hoverIdx = idx; this.redraw(); }

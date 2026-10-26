@@ -85,6 +85,7 @@ export const ICONS = {
   carc: svg(`<path d="M5 18 A9 9 0 0 1 20 9" stroke="${BD}" stroke-width="1.8"/><circle cx="14" cy="18" r="1.6" fill="${BD}"/><path d="M14 18 L5 18 M14 18 L20 9" stroke="${G}" stroke-dasharray="1.5 1.5"/>`),
   tarc: svg(`<path d="M2 18 H11" stroke="${G}" stroke-width="1.8"/><path d="M11 18 A7 7 0 0 0 18 11 V4" stroke="${BD}" stroke-width="1.8"/><circle cx="11" cy="18" r="1.8" fill="#fff" stroke="${BD}"/>`),
   rect3: svg(`<path d="M4 15 L14 4 L21 11 L11 22 Z" stroke="${BD}" stroke-width="1.8"/><circle cx="4" cy="15" r="1.8" fill="#fff" stroke="${BD}"/><circle cx="14" cy="4" r="1.8" fill="#fff" stroke="${BD}"/>`),
+  convert: svg(`<path d="M3 9 L12 5 L21 9 L21 15 L12 19 L3 15 Z" fill="${Y}" fill-opacity=".5" stroke="${YD}"/><path d="M3 9 L12 13 L21 9" stroke="${BD}" stroke-width="2.2"/>`),
   slot: svg(`<path d="M8 7 h8 a5 5 0 0 1 0 10 h-8 a5 5 0 0 1 0 -10 z" stroke="${BD}" stroke-width="1.8"/><circle cx="8" cy="12" r="1.4" fill="${BD}"/><circle cx="16" cy="12" r="1.4" fill="${BD}"/>`),
   spline: svg(`<path d="M3 17 C 7 3, 12 21, 21 7" stroke="${BD}" stroke-width="1.8"/><circle cx="3" cy="17" r="1.8" fill="#fff" stroke="${BD}"/><circle cx="12" cy="12" r="1.8" fill="#fff" stroke="${BD}"/><circle cx="21" cy="7" r="1.8" fill="#fff" stroke="${BD}"/>`),
   point: svg(`<circle cx="12" cy="12" r="3" fill="${BD}"/><path d="M12 4 v4 M12 16 v4 M4 12 h4 M16 12 h4" stroke="${BD}" stroke-width="1.4"/>`),
